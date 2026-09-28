@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: macos-latest
+          arch: arm64
+          runner: macos-latest
+          expander_leg: macos-latest--arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+      # setup-java can't find a Temurin 25 build for Windows on arm64, so that
+      # leg uses the Microsoft Build of OpenJDK. Every other leg keeps Temurin.
+    - name: Set up JDK 25
+      uses: actions/setup-java@v5
+      with:
+        java-version: '25'
+        distribution: ${{ matrix.distribution || 'temurin' }}
+        cache: maven
+
+    - name: Install dependencies for acknowledgments script
+      run: |
+        case "$RUNNER_OS" in
+          Linux)
+            sudo apt-get update
+            sudo apt-get install -y jq curl
+            ;;
+          macOS)
+            command -v jq >/dev/null 2>&1 || brew install jq
+            command -v curl >/dev/null 2>&1 || brew install curl
+            ;;
+          Windows)
+            command -v jq >/dev/null 2>&1 || choco install -y jq
+            command -v curl >/dev/null 2>&1 || choco install -y curl
+            ;;
+        esac
+        jq --version
+        curl --version
+
+    - name: Generate acknowledgments data
+      run: |
+        chmod +x scripts/generate-acknowledgments.sh
+        ./scripts/generate-acknowledgments.sh
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build JAR without tests
+      run: mvn compile package -DskipTests
+
+    - name: Create bundle
+      run: mkdir staging && cp target/*.jar staging
+
+    - name: Upload JAR artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: jar-artifact-${{ matrix.os }}-${{ matrix.arch }}
+        path: staging/
+        retention-days: 1
+
+    name: build [${{ matrix.expander_leg }}]
+    timeout-minutes: 150
