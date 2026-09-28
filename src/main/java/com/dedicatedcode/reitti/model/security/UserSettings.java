@@ -1,0 +1,150 @@
+package com.dedicatedcode.reitti.model.security;
+
+import com.dedicatedcode.reitti.model.Language;
+import com.dedicatedcode.reitti.model.TimeDisplayMode;
+import com.dedicatedcode.reitti.model.TimeMode;
+import com.dedicatedcode.reitti.model.UnitSystem;
+
+import java.io.Serializable;
+import java.time.Instant;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.util.Objects;
+
+public class UserSettings implements Serializable {
+
+    private final Long userId;
+    private final Language selectedLanguage;
+    private final UnitSystem unitSystem;
+    private final Double homeLatitude;
+    private final Double homeLongitude;
+    private final ZoneId timeZoneOverride;
+    private final TimeDisplayMode timeDisplayMode;
+    private final TimeMode timeMode;
+    private final LocalTime dayStartTime;
+    private final String customCss;
+    private final Instant latestData;
+    private final String color;
+    private final Long version;
+
+    public UserSettings(Long userId, Language selectedLanguage, UnitSystem unitSystem, Double homeLatitude, Double homeLongitude, ZoneId timeZoneOverride, TimeDisplayMode timeDisplayMode, TimeMode timeMode, LocalTime dayStartTime, String customCss, Instant latestData, String color, Long version) {
+        this.userId = userId;
+        this.selectedLanguage = selectedLanguage;
+        this.unitSystem = unitSystem;
+        this.homeLatitude = homeLatitude;
+        this.homeLongitude = homeLongitude;
+        this.timeZoneOverride = timeZoneOverride;
+        this.timeDisplayMode = timeDisplayMode;
+        this.timeMode = timeMode;
+        this.dayStartTime = dayStartTime;
+        this.customCss = customCss;
+        this.latestData = latestData;
+        this.color = color;
+        this.version = version;
+    }
+
+    public static UserSettings defaultSettings(Long userId) {
+        return new UserSettings(userId,  Language.EN, UnitSystem.METRIC, null, null, null, TimeDisplayMode.DEFAULT, TimeMode.TWENTY_FOUR_HOUR, LocalTime.MIDNIGHT, null, null, "#f1ba63", null);
+    }
+    public Long getUserId() {
+        return userId;
+    }
+    
+    public Language getSelectedLanguage() {
+        return selectedLanguage;
+    }
+    
+    public Long getVersion() {
+        return version;
+    }
+
+    public UnitSystem getUnitSystem() {
+        return unitSystem;
+    }
+
+    public Double getHomeLatitude() {
+        return homeLatitude;
+    }
+
+    public Double getHomeLongitude() {
+        return homeLongitude;
+    }
+
+    public Instant getLatestData() {
+        return latestData;
+    }
+
+    public TimeDisplayMode getTimeDisplayMode() {
+        return timeDisplayMode;
+    }
+
+    public TimeMode getTimeMode() {
+        return timeMode;
+    }
+
+    public LocalTime getDayStartTime() {
+        return dayStartTime;
+    }
+
+    public ZoneId getTimeZoneOverride() {
+        return timeZoneOverride;
+    }
+
+    public String getCustomCss() {
+        return customCss;
+    }
+
+    public UserSettings withHomeCoordinates(Double homeLatitude, Double homeLongitude) {
+        return new UserSettings(userId, selectedLanguage, unitSystem, homeLatitude, homeLongitude, timeZoneOverride, timeDisplayMode, this.timeMode, dayStartTime, customCss, latestData, color, version);
+    }
+
+    public String getColor() {
+        return color;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        UserSettings that = (UserSettings) o;
+        return  Objects.equals(userId, that.userId) &&
+                Objects.equals(selectedLanguage, that.selectedLanguage) &&
+                Objects.equals(unitSystem, that.unitSystem) &&
+                Objects.equals(homeLatitude, that.homeLatitude) &&
+                Objects.equals(homeLongitude, that.homeLongitude) &&
+                Objects.equals(timeZoneOverride, that.timeZoneOverride) &&
+                Objects.equals(timeDisplayMode, that.timeDisplayMode) &&
+                Objects.equals(timeMode, that.timeMode) &&
+                Objects.equals(dayStartTime, that.dayStartTime) &&
+                Objects.equals(customCss, that.customCss) &&
+                Objects.equals(latestData, that.latestData) &&
+                Objects.equals(version, that.version);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(userId, selectedLanguage, unitSystem, homeLatitude, homeLongitude, timeZoneOverride, timeDisplayMode, timeMode, dayStartTime, customCss, latestData, version);
+    }
+
+    @Override
+    public String toString() {
+        return "UserSettings{" +
+                "userId=" + userId +
+                ", selectedLanguage='" + selectedLanguage + '\'' +
+                ", unitSystem=" + unitSystem +
+                ", homeLatitude=" + homeLatitude +
+                ", homeLongitude=" + homeLongitude +
+                ", timeZoneOverride=" + timeZoneOverride +
+                ", timeDisplayMode=" + timeDisplayMode +
+                ", timeMode=" + timeMode +
+                ", dayStartTime=" + dayStartTime +
+                ", customCss=" + (customCss != null ? "[" + customCss.length() + " chars]" : "null") +
+                ", latestData=" + latestData +
+                ", version=" + version +
+                '}';
+    }
+
+    public UserSettings withVersion(long version) {
+        return new UserSettings(userId, selectedLanguage, unitSystem, homeLatitude, homeLongitude, timeZoneOverride, timeDisplayMode, timeMode, dayStartTime, customCss, latestData, color, version);
+    }
+}

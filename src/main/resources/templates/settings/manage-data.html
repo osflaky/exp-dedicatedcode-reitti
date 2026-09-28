@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="#{settings.title}">Settings - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="apple-touch-icon" th:href="@{/img/logo.svg}">
+    <link rel="shortcut icon" type="image/x-icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}">
+    <script th:src="@{/js/messages.js(v=${appVersion})}"></script>
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+    <script th:src="@{/js/util.js}"></script>
+</head>
+<body class="settings-page">
+<div class="navigation-container" th:replace="~{fragments/main-navigation :: main-navigation('settings')}"></div>
+
+<div class="settings-container">
+    <div th:replace="~{fragments/settings-navigation :: settings-nav(${activeSection}, ${dataManagementEnabled}, ${isAdmin})}"></div>
+    <div class="settings-content-area">
+        <div id="manage-data" class="settings-section active">
+            <div th:fragment="manage-data-content">
+                <h2 th:text="#{data.title}">Manage Data</h2>
+
+                <div th:if="${successMessage}" class="alert alert-success" style="display: block;">
+                    <span th:text="${successMessage}">Processing started successfully</span>
+                </div>
+                <div th:if="${errorMessage}" class="alert alert-danger" style="display: block;">
+                    <span th:text="${errorMessage}">Error message</span>
+                </div>
+
+                <div class="settings-card">
+                    <h3 th:text="#{data.about.title}">About Data Processing</h3>
+                    <p th:text="#{data.about.description}">This section allows you to manually trigger data processing operations. These operations normally run automatically on a schedule, but you can trigger them manually here if needed.</p>
+                    <p><strong th:text="#{data.about.warning}">Warning: Manual processing may take some time depending on the amount of data to process.</strong> </p>
+                </div>
+
+                <div class="settings-card">
+                    <div class="action-card">
+                        <h3 th:text="#{data.process.visits.title}">Process Visits and Trips</h3>
+                        <p th:text="#{data.process.visits.description}">Manually trigger the processing of raw location data into visits and trips. This will analyze unprocessed location points and create meaningful visits and trips from them.</p>
+                        <button class="btn"
+                                th:hx-post="@{/settings/manage-data/process-visits-trips}"
+                                hx-target="#manage-data"
+                                hx-swap="innerHTML"
+                                th:attr="hx-confirm=#{data.process.visits.confirm}"
+                                th:text="#{data.process.visits.button}">
+                            Start Processing
+                        </button>
+                    </div>
+
+                    <div class="action-card" style="margin-top: 15px;">
+                        <h3 th:text="#{data.clear.reprocess.title}">Clear and Reprocess All Data</h3>
+                        <p th:text="#{data.clear.reprocess.description}">Clear all processed data (visits, trips, processed visits) while preserving significant places and raw location points. Raw location points will be marked as unprocessed, and the processing pipeline will be triggered automatically.</p>
+                        <div class="alert alert-warning">
+                            <strong>⚠️ <span th:text="#{label.warning}">Warning:</span></strong> <span th:text="#{data.clear.reprocess.warning}">This action will permanently delete all visits, trips, and processed visits. This cannot be undone.</span>
+                        </div>
+                        <button class="btn btn-danger"
+                                th:hx-post="@{/settings/manage-data/clear-and-reprocess}"
+                                hx-target="#manage-data"
+                                hx-swap="innerHTML"
+                                th:attr="hx-confirm=#{data.clear.reprocess.confirm}"
+                                th:text="#{data.clear.reprocess.button}">
+                            Clear and Reprocess
+                        </button>
+                    </div>
+
+                    <div class="action-card" style="margin-top: 15px;">
+                        <h3 th:text="#{data.remove.all.title}">Remove All Data</h3>
+                        <p th:text="#{data.remove.all.description}">Remove all data except significant places. This will permanently delete all raw location points, visits, trips, and processed visits while preserving your significant places.</p>
+                        <!-- Verification UI -->
+                        <div th:if="${deleteAllRequiresVerification}" class="verification-container">
+                            <p th:text="#{data.remove.all.verification.required}">Verification Required:</p>
+                            <p><span th:text="#{data.remove.all.verification.instruction}">To confirm deletion, please enter the server hostname:</span> <code id="expected-hostname-display" th:text="${serverHostname}"></code></p>
+                            
+                            <input type="text" 
+                                   id="delete-verification-input"
+                                   name="hostname"
+                                   th:placeholder="#{data.remove.all.verification.placeholder}"
+                                   oninput="checkDeleteVerification()">
+                            
+                            <button class="btn btn-danger"
+                                    id="delete-all-confirmed-btn"
+                                    th:hx-post="@{/settings/manage-data/remove-all-data}"
+                                    hx-target="#manage-data"
+                                    hx-swap="innerHTML"
+                                    hx-include="#delete-verification-input"
+                                    th:text="#{data.remove.all.button}"
+                                    style="margin-top: 15px; display: none;">
+                                Remove All Data
+                            </button>
+                            <span id="delete-all-hint" style="display: inline-block; color: #666; font-size: 0.9em; margin-left: 10px;" th:text="#{data.remove.all.verification.hint}">Enter the hostname to enable the button.</span>
+                        </div>
+
+                        <div th:unless="${deleteAllRequiresVerification}">
+                            <button class="btn btn-danger"
+                                    th:hx-post="@{/settings/manage-data/remove-all-data}"
+                                    hx-target="#manage-data"
+                                    hx-swap="innerHTML"
+                                    th:attr="hx-confirm=#{data.remove.all.confirm}"
+                                    th:text="#{data.remove.all.button}"
+                                    style="margin-top: 15px;">
+                                Remove All Data
+                            </button>
+                        </div>
+
+                        <div class="alert alert-danger" style="margin-top: 15px;">
+                            <strong>⚠️ Danger:</strong> <span th:text="#{data.remove.all.warning}">This action will permanently delete ALL location data except significant places. This cannot be undone.</span>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+<script th:inline="javascript">
+    window.userSettings = /*[[${userSettings}]]*/ {}
+
+    function checkDeleteVerification() {
+        const input = document.getElementById('delete-verification-input');
+        const btn = document.getElementById('delete-all-confirmed-btn');
+        const hint = document.getElementById('delete-all-hint');
+        const expected = document.getElementById('expected-hostname-display').textContent.trim();
+        
+        if (input.value.trim() === expected) {
+            btn.style.display = 'inline-block';
+            btn.style.pointerEvents = 'auto';
+            btn.style.opacity = '1';
+            if (hint) hint.style.display = 'none';
+        } else {
+            btn.style.display = 'none';
+            btn.style.pointerEvents = 'none';
+            btn.style.opacity = '0.5';
+            if (hint) hint.style.display = 'inline-block';
+        }
+    }
+</script>
+</body>
+</html>

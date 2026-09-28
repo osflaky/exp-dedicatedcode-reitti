@@ -1,0 +1,335 @@
+package com.dedicatedcode.reitti.repository;
+
+import com.dedicatedcode.reitti.IntegrationTest;
+import com.dedicatedcode.reitti.dto.LocationPoint;
+import com.dedicatedcode.reitti.model.*;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.model.security.UserSettings;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.time.Instant;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@IntegrationTest
+public class UserSettingsJdbcServiceTest {
+    @Autowired
+    private UserSettingsJdbcService userSettingsJdbcService;
+    @Autowired
+    private UserJdbcService userJdbcService;
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private Long testUserId1;
+
+    @BeforeEach
+    void setUp() {
+        // Create test users
+        testUserId1 = createTestUser();
+    }
+
+    private Long createTestUser() {
+        String username = "user_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        jdbcTemplate.update(
+                "INSERT INTO users (username, password, display_name, role) VALUES (?, ?, ?, ?)",
+                username, "password", "Test User", Role.ADMIN.name()
+        );
+        return jdbcTemplate.queryForObject(
+                "SELECT id FROM users WHERE username = ?",
+                Long.class,
+                username
+        );
+    }
+
+    @Test
+    void findByUserId_WhenUserSettingsDoNotExist_ShouldReturnEmpty() {
+        Optional<UserSettings> result = userSettingsJdbcService.findByUserId(testUserId1);
+        
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void save_WhenCreatingNewUserSettings_ShouldInsertAndReturnWithId() {
+        UserSettings newSettings = new UserSettings(testUserId1,
+                                                    Language.FI,
+                                                    UnitSystem.METRIC,
+                                                    60.1699,
+                                                    24.9384,
+                                                    null,
+                                                    TimeDisplayMode.DEFAULT,
+                                                    TimeMode.TWENTY_FOUR_HOUR, LocalTime.MIDNIGHT, null,
+                                                    Instant.now(),
+                                                    "#f1ba63",
+                                                    null);
+        
+        UserSettings savedSettings = userSettingsJdbcService.save(newSettings);
+        
+        assertThat(savedSettings.getUserId()).isEqualTo(testUserId1);
+        assertThat(savedSettings.getSelectedLanguage()).isEqualTo(Language.FI);
+        assertThat(savedSettings.getHomeLatitude()).isEqualTo(60.1699);
+        assertThat(savedSettings.getHomeLongitude()).isEqualTo(24.9384);
+        assertThat(savedSettings.getVersion()).isEqualTo(1L);
+    }
+
+    @Test
+    void save_WhenUpdatingExistingUserSettings_ShouldUpdateAndIncrementVersion() {
+        // Create initial settings
+        UserSettings initialSettings = new UserSettings(testUserId1,
+                                                        Language.EN,
+                                                        UnitSystem.METRIC,
+                                                        null,
+                                                        null,
+                                                        null,
+                                                        TimeDisplayMode.DEFAULT,
+                                                        TimeMode.TWENTY_FOUR_HOUR,
+                                                        LocalTime.MIDNIGHT,
+                                                        null,
+                                                        Instant.now(),
+                                                        "#f1ba63",
+                                                        null);
+        UserSettings savedSettings = userSettingsJdbcService.save(initialSettings);
+        
+        // Update settings
+        UserSettings updatedSettings = new UserSettings(
+                testUserId1,
+                Language.DE,
+                UnitSystem.IMPERIAL,
+                52.5200,
+                13.4050,
+                null,
+                TimeDisplayMode.DEFAULT,
+                TimeMode.TWENTY_FOUR_HOUR,
+                LocalTime.MIDNIGHT,
+                null,
+                Instant.now(),
+                "#f1ba63",
+                savedSettings.getVersion());
+
+        UserSettings result = userSettingsJdbcService.save(updatedSettings);
+        
+        assertThat(result.getUserId()).isEqualTo(testUserId1);
+        assertThat(result.getSelectedLanguage()).isEqualTo(Language.DE);
+        assertThat(result.getUnitSystem()).isEqualTo(UnitSystem.IMPERIAL);
+        assertThat(result.getHomeLatitude()).isEqualTo(52.5200);
+        assertThat(result.getHomeLongitude()).isEqualTo(13.4050);
+        assertThat(result.getVersion()).isEqualTo(2L);
+    }
+
+    @Test
+    void findByUserId_WhenUserSettingsExist_ShouldReturnSettings() {
+        // Create settings
+        UserSettings newSettings = new UserSettings(testUserId1,
+                                                    Language.FR,
+                                                    UnitSystem.METRIC,
+                                                    48.8566,
+                                                    2.3522,
+                                                    null,
+                                                    TimeDisplayMode.DEFAULT,
+                                                    TimeMode.TWENTY_FOUR_HOUR,
+                                                    LocalTime.MIDNIGHT,
+                                                    null,
+                                                    Instant.now(),
+                                                    "#f1ba63",
+                                                    null);
+        userSettingsJdbcService.save(newSettings);
+        
+        Optional<UserSettings> result = userSettingsJdbcService.findByUserId(testUserId1);
+        
+        assertThat(result).isPresent();
+        assertThat(result.get().getUserId()).isEqualTo(testUserId1);
+        assertThat(result.get().getSelectedLanguage()).isEqualTo(Language.FR);
+        assertThat(result.get().getHomeLatitude()).isEqualTo(48.8566);
+        assertThat(result.get().getHomeLongitude()).isEqualTo(2.3522);
+    }
+
+    @Test
+    void getOrCreateDefaultSettings_WhenUserSettingsDoNotExist_ShouldCreateDefault() {
+        UserSettings result = userSettingsJdbcService.getOrCreateDefaultSettings(testUserId1);
+        
+        assertThat(result.getUserId()).isEqualTo(testUserId1);
+        assertThat(result.getSelectedLanguage()).isEqualTo(Language.EN);
+        assertThat(result.getUnitSystem()).isEqualTo(UnitSystem.METRIC);
+        assertThat(result.getHomeLatitude()).isNull();
+        assertThat(result.getHomeLongitude()).isNull();
+        assertThat(result.getVersion()).isEqualTo(1L);
+        
+        // Verify it was actually saved to database
+        Optional<UserSettings> fromDb = userSettingsJdbcService.findByUserId(testUserId1);
+        assertThat(fromDb).isPresent();
+    }
+
+    @Test
+    void getOrCreateDefaultSettings_WhenUserSettingsExist_ShouldReturnExisting() {
+        // Create existing settings
+        UserSettings existingSettings = new UserSettings(testUserId1,
+                                                         Language.FI,
+                                                         UnitSystem.METRIC,
+                                                         60.1699,
+                                                         24.9384,
+                                                         null,
+                                                         TimeDisplayMode.DEFAULT,
+                                                         TimeMode.TWENTY_FOUR_HOUR,
+                                                         LocalTime.MIDNIGHT,
+                                                         null,
+                                                         Instant.now(),
+                                                         "#f1ba63",
+                                                         null);
+        userSettingsJdbcService.save(existingSettings);
+        
+        UserSettings result = userSettingsJdbcService.getOrCreateDefaultSettings(testUserId1);
+        
+        assertThat(result.getSelectedLanguage()).isEqualTo(Language.FI);
+        assertThat(result.getHomeLatitude()).isEqualTo(60.1699);
+        assertThat(result.getHomeLongitude()).isEqualTo(24.9384);
+    }
+
+    @Test
+    void defaultSettings_ShouldHaveCorrectValues() {
+        UserSettings defaultSettings = UserSettings.defaultSettings(testUserId1);
+
+        assertThat(defaultSettings.getUserId()).isEqualTo(testUserId1);
+        assertThat(defaultSettings.getSelectedLanguage()).isEqualTo(Language.EN);
+        assertThat(defaultSettings.getUnitSystem()).isEqualTo(UnitSystem.METRIC);
+        assertThat(defaultSettings.getHomeLatitude()).isNull();
+        assertThat(defaultSettings.getHomeLongitude()).isNull();
+        assertThat(defaultSettings.getDayStartTime()).isEqualTo(LocalTime.MIDNIGHT);
+        assertThat(defaultSettings.getVersion()).isNull();
+    }
+
+    @Test
+    void saveAndRetrieve_ShouldCorrectlyStoreTimeMode() {
+        // Test saving TWELVE_HOUR
+        UserSettings twelveHourSettings = new UserSettings(testUserId1,
+                                                           Language.EN,
+                                                           UnitSystem.METRIC,
+                                                           null,
+                                                           null,
+                                                           null,
+                                                           TimeDisplayMode.DEFAULT,
+                                                           TimeMode.TWELVE_HOUR,
+                                                           LocalTime.MIDNIGHT,
+                                                           null,
+                                                           Instant.now(),
+                                                           "#f1ba63",
+                                                           null);
+        userSettingsJdbcService.save(twelveHourSettings);
+        
+        Optional<UserSettings> retrieved = userSettingsJdbcService.findByUserId(testUserId1);
+        assertThat(retrieved).isPresent();
+        assertThat(retrieved.get().getTimeMode()).isEqualTo(TimeMode.TWELVE_HOUR);
+        
+        // Update to TWENTY_FOUR_HOUR
+        UserSettings twentyFourHourSettings = new UserSettings(
+                testUserId1,
+                Language.EN,
+                UnitSystem.METRIC,
+                null,
+                null,
+                null,
+                TimeDisplayMode.DEFAULT,
+                TimeMode.TWENTY_FOUR_HOUR,
+                LocalTime.MIDNIGHT,
+                null,
+                Instant.now(),
+                "#f1ba63",
+                retrieved.get().getVersion());
+        
+        userSettingsJdbcService.save(twentyFourHourSettings);
+        
+        Optional<UserSettings> updated = userSettingsJdbcService.findByUserId(testUserId1);
+        assertThat(updated).isPresent();
+        assertThat(updated.get().getTimeMode()).isEqualTo(TimeMode.TWENTY_FOUR_HOUR);
+    }
+
+    @Test
+    void saveAndRetrieve_ShouldCorrectlyStoreDayStartTime() {
+        // Test saving 04:30
+        UserSettings fourThirtySettings = new UserSettings(testUserId1,
+                                                           Language.EN,
+                                                           UnitSystem.METRIC,
+                                                           null,
+                                                           null,
+                                                           null,
+                                                           TimeDisplayMode.DEFAULT,
+                                                           TimeMode.TWENTY_FOUR_HOUR,
+                                                           LocalTime.of(4, 30),
+                                                           null,
+                                                           Instant.now(),
+                                                           "#f1ba63",
+                                                           null);
+        userSettingsJdbcService.save(fourThirtySettings);
+
+        Optional<UserSettings> retrieved = userSettingsJdbcService.findByUserId(testUserId1);
+        assertThat(retrieved).isPresent();
+        assertThat(retrieved.get().getDayStartTime()).isEqualTo(LocalTime.of(4, 30));
+
+        // Update to 02:15
+        UserSettings twoFifteenSettings = new UserSettings(
+                testUserId1,
+                Language.EN,
+                UnitSystem.METRIC,
+                null,
+                null,
+                null,
+                TimeDisplayMode.DEFAULT,
+                TimeMode.TWENTY_FOUR_HOUR,
+                LocalTime.of(2, 15),
+                null,
+                Instant.now(),
+                "#f1ba63",
+                retrieved.get().getVersion());
+
+        userSettingsJdbcService.save(twoFifteenSettings);
+
+        Optional<UserSettings> updated = userSettingsJdbcService.findByUserId(testUserId1);
+        assertThat(updated).isPresent();
+        assertThat(updated.get().getDayStartTime()).isEqualTo(LocalTime.of(2, 15));
+    }
+
+    @Test
+    void shouldUpdateNewestValue() {
+        User user = userJdbcService.findById(testUserId1).orElseThrow();
+        this.userSettingsJdbcService.save(UserSettings.defaultSettings(testUserId1));
+        this.userSettingsJdbcService.updateNewestData(user, List.of());
+
+        Instant latest = Instant.now();
+        this.userSettingsJdbcService.updateNewestData(user, List.of(
+                createLocationPoint(latest),
+                createLocationPoint(latest.minus(1, ChronoUnit.MINUTES)),
+                createLocationPoint(latest.minus(2, ChronoUnit.MINUTES))
+        ));
+
+        Optional<UserSettings> persisted = this.userSettingsJdbcService.findByUserId(user.getId());
+
+        assertThat(persisted).isPresent();
+        assertThat(persisted.get().getLatestData()).isEqualTo(latest.plusNanos(500).truncatedTo(ChronoUnit.MICROS));
+
+
+        this.userSettingsJdbcService.updateNewestData(user, List.of(
+                createLocationPoint(latest.minus(1, ChronoUnit.MINUTES)),
+                createLocationPoint(latest.minus(1, ChronoUnit.MINUTES)),
+                createLocationPoint(latest.minus(2, ChronoUnit.MINUTES))
+        ));
+
+        assertThat(this.userSettingsJdbcService.findByUserId(user.getId()).get().getLatestData()).isEqualTo(latest.plusNanos(500).truncatedTo(ChronoUnit.MICROS));
+    }
+
+
+
+    private LocationPoint createLocationPoint(Instant timestamp) {
+        LocationPoint locationPoint = new LocationPoint();
+        locationPoint.setTimestamp(timestamp);
+        locationPoint.setLatitude(1.0);
+        locationPoint.setLongitude(2.0);
+        locationPoint.setAccuracyMeters(10.0);
+        return locationPoint;
+    }
+}

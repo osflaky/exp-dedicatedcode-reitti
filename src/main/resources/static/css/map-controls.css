@@ -1,0 +1,108 @@
+
+/* Intentionally NOT position:relative: the .map-controls dropdown must anchor
+   to the fixed bottom bar (nearest positioned ancestor) so it can never be
+   positioned partially outside the viewport, no matter where the trigger
+   button sits within the bar. */
+.map-controls-section {
+    display: flex;
+    align-items: center;
+}
+
+.map-controls {
+    position: absolute;
+    right: 22px;
+    /* opens just above the bottom bar, whatever its height (wrapped rows
+       on mobile) — the containing block is the fixed bar itself */
+    bottom: calc(100% + 6px);
+    background: var(--color-background-dark-light);
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: var(--box-shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+    z-index: 1000;
+}
+
+.map-controls-section.open .map-controls {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Ghost fallback when the controls are mounted outside the bottom bar
+   (live mode user-selection area) */
+#live-mode-map-controls-section .map-controls-section .bar-btn {
+    border: none;
+    background: transparent;
+}
+
+.map-controls button {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 4px 8px;
+    white-space: nowrap;
+}
+
+.map-controls button i,
+.map-style-selector i {
+    font-size: 1.3rem;
+}
+
+.map-style-selector {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    color: var(--color-primary);
+    padding: 4px 8px;
+    position: relative;
+    white-space: nowrap;
+}
+
+.map-style-selector::after {
+    content: "";
+    position: absolute;
+    right: 16px;
+    width: 7px;
+    height: 7px;
+    border-right: 2px solid rgba(245, 222, 179, 0.55);
+    border-bottom: 2px solid rgba(245, 222, 179, 0.55);
+    pointer-events: none;
+    transform: translateY(-2px) rotate(45deg);
+}
+
+.map-style-selector select {
+    appearance: none;
+    -moz-appearance: none;
+    -webkit-appearance: none;
+    min-width: 150px;
+    color: var(--color-primary);
+    background: var(--color-background-dark-light);
+    border: 1px solid var(--color-primary);
+    border-radius: 4px;
+    padding: 4px 30px 4px 8px;
+    font: inherit;
+}
+
+.map-control-btn.active {
+    background: var(--color-background-dark-light);
+}
+
+.auto-update-overlay .fab-btn:first-child {
+    border-top-left-radius: 50%;
+    border-bottom-left-radius: 50%;
+}
+
+.auto-update-overlay .fab-btn {
+    background: transparent;
+    color: white;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}

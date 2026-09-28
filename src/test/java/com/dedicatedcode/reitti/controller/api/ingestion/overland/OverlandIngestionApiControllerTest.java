@@ -1,0 +1,113 @@
+package com.dedicatedcode.reitti.controller.api.ingestion.overland;
+
+import com.dedicatedcode.reitti.IntegrationTest;
+import com.dedicatedcode.reitti.TestingService;
+import com.dedicatedcode.reitti.model.devices.Device;
+import com.dedicatedcode.reitti.model.security.DeviceTokenUser;
+import com.dedicatedcode.reitti.model.security.User;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureWebMvc;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@IntegrationTest
+@AutoConfigureWebMvc
+class OverlandIngestionApiControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private TestingService testingService;
+    private User testUser;
+    private Device device;
+
+    @BeforeEach
+    void setUp() {
+        testUser = testingService.randomUser();
+        device = testingService.findDefaultDevice(testUser);
+    }
+
+
+    @Test
+    void testOverlandIngestWithoutElevation() throws Exception {
+
+        String overlandPayload = """
+                {
+                    "locations": [
+                        {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [10.700927, 53.863149]
+                            },
+                            "properties": {
+                                "timestamp": "2023-11-09T12:00:00Z",
+                                "horizontal_accuracy": 10.5
+                            }
+                        }
+                    ]
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/ingest/overland")
+                                .with(user(new DeviceTokenUser(testUser, device)))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(overlandPayload))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.result").value("ok"));
+    }
+
+    @Test
+    void testOverlandIngestWithElevation() throws Exception {
+        String overlandPayload = """
+                {
+                    "locations": [
+                        {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Point",
+                                "coordinates": [10.700927, 53.863149, 42.5]
+                            },
+                            "properties": {
+                                "timestamp": "2023-11-09T12:00:00Z",
+                                "horizontal_accuracy": 10.5,
+                                "altitude": 42.5
+                            }
+                        }
+                    ]
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/ingest/overland")
+                                .with(user(new DeviceTokenUser(testUser, device)))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(overlandPayload))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.result").value("ok"));
+    }
+
+    @Test
+    void testOverlandIngestWithEmptyLocations() throws Exception {
+
+        String overlandPayload = """
+                {
+                    "locations": []
+                }
+                """;
+
+        mockMvc.perform(post("/api/v1/ingest/overland")
+                                .with(user(new DeviceTokenUser(testUser, device)))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(overlandPayload))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.result").value("ok"));
+    }
+}

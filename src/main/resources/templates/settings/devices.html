@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="#{settings.title}">Settings - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="apple-touch-icon" th:href="@{/img/logo.svg}">
+    <link rel="shortcut icon" type="image/x-icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}">
+    <script th:src="@{/js/messages.js(v=${appVersion})}"></script>
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+    <script th:src="@{/js/util.js}"></script>
+</head>
+<body class="settings-page">
+<div class="navigation-container" th:replace="~{fragments/main-navigation :: main-navigation('settings')}"></div>
+<div class="settings-container">
+    <div th:replace="~{fragments/settings-navigation :: settings-nav(${activeSection}, ${dataManagementEnabled}, ${isAdmin})}"></div>
+    <div class="settings-content-area">
+        <div id="devices" class="settings-section active">
+            <div th:fragment="devices-content">
+                <h2 th:text="#{devices.title}">Devices</h2>
+
+                <div th:if="${successMessage}" class="alert alert-success" style="display: block;">
+                    <span th:text="${successMessage}">Device created successfully</span>
+                </div>
+                <div th:if="${errorMessage}" class="alert alert-danger" style="display: block;">
+                    <span th:text="${errorMessage}">Error message</span>
+                </div>
+
+                <div class="settings-card" th:if="${!devices.isEmpty()}">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th th:text="#{devices.table.name}">Name</th>
+                            <th th:text="#{devices.table.status}">Status</th>
+                            <th th:text="#{devices.table.showOnMap}">Show on Map</th>
+                            <th th:text="#{devices.table.created}">Created</th>
+                            <th th:text="#{devices.table.actions}">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr th:each="device : ${devices}">
+                            <td> <span class="color-swatch" th:style="'margin-right: 8px; background-color: ' + ${device.color()}"></span><span th:text="${device.name()}"></span></td>
+                            <td>
+                                <span th:if="${device.defaultDevice()}">
+                                    <i class="lni lni-flag-1"></i>
+                                    <span th:text="#{devices.status.default}">Default</span>
+                                </span>
+                                <span th:if="${!device.defaultDevice() && device.enabled()}">
+                                    <i class="lni lni-check"></i>
+                                    <span th:text="#{devices.status.enabled}">Enabled</span>
+                                </span>
+                                <span th:unless="${device.enabled()}" style="color: var(--color-warn);">
+                                    <i class="lni lni-xmark"></i>
+                                    <span th:text="#{devices.status.disabled}">Disabled</span>
+                                </span>
+                            </td>
+                            <td>
+                                <span th:if="${device.showOnMap()}">
+                                    <i class="lni lni-check"></i>
+                                    <span th:text="#{common.choice.yes}">Yes</span>
+                                </span>
+                                <span th:unless="${device.showOnMap()}">
+                                    <i class="lni lni-xmark"></i>
+                                    <span th:text="#{common.choice.no}">No</span>
+                                </span>
+                            </td>
+                            <td th:text="${#temporals.format(device.createdAt(), 'yyyy-MM-dd HH:mm')}"></td>
+                            <td>
+                                <button class="btn"
+                                        th:attr="hx-get=@{/settings/devices/edit/{id}(id=${device.id()})}"
+                                        hx-target="#device-form-container"
+                                        hx-swap="innerHTML"
+                                        th:text="#{form.edit}">
+                                    Edit
+                                </button>
+
+                                <button class="btn"
+                                        th:attr="hx-post=@{/settings/devices/{id}/toggle(id=${device.id()})}"
+                                        hx-target="#devices"
+                                        hx-swap="innerHTML"
+                                        th:text="${device.enabled() ? #messages.msg('common.choice.disable') : #messages.msg('common.choice.enable')}">
+                                    Toggle
+                                </button>
+                                <button th:unless="${device.defaultDevice()}"
+                                        class="btn"
+                                        th:attr="hx-post=@{/settings/devices/{id}/set-default(id=${device.id()})}, hx-confirm=#{devices.default.confirm}"
+                                        hx-target="#devices"
+                                        hx-swap="innerHTML"
+                                        th:text="#{devices.actions.set-default}">Set as Default
+                                </button>
+                                <button th:unless="${device.defaultDevice()}"
+                                        class="btn btn-danger"
+                                        th:attr="hx-post=@{/settings/devices/{id}/delete(id=${device.id()})}, hx-confirm=#{devices.delete.confirm}"
+                                        hx-target="#devices"
+                                        hx-swap="innerHTML"
+                                        th:text="#{form.delete}">Delete
+                                </button>
+
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="settings-card" id="device-form-container">
+                    <button class="btn"
+                            th:hx-get="@{/settings/devices/create-form}"
+                            hx-target="this"
+                            hx-swap="outerHTML"
+                            th:text="#{devices.add.title}">Create New Device</button>
+                </div>
+
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script th:inline="javascript">
+    window.userSettings = /*[[${userSettings}]]*/ {}
+    
+    function updateCustomColor(color) {
+        const customColorRadio = document.getElementById('customColorRadio');
+        const customColorText = document.getElementById('customColorText');
+        const customColorSwatch = document.getElementById('customColorSwatch');
+        
+        customColorRadio.value = color;
+        customColorRadio.checked = true;
+        customColorText.value = color;
+        customColorSwatch.style.backgroundColor = color;
+        customColorSwatch.innerHTML = '';
+    }
+    
+    function updateCustomColorFromText(color) {
+        if (/^#[0-9A-Fa-f]{6}$/.test(color)) {
+            const customColorInput = document.getElementById('customColorInput');
+            customColorInput.value = color;
+            updateCustomColor(color);
+        }
+    }
+    
+    function showCustomColorInput() {
+        document.getElementById('customColorInputSection').style.display = 'block';
+    }
+    
+    function hideCustomColorInput() {
+        document.getElementById('customColorInputSection').style.display = 'none';
+        const customColorSwatch = document.getElementById('customColorSwatch');
+        customColorSwatch.style.backgroundColor = '';
+        customColorSwatch.innerHTML = '<span class="custom-color-icon">+</span>';
+    }
+
+    function resetToDefaultColor() {
+        const defaultColorInput = document.querySelector('input[name="color"][value="#f1ba63"]');
+        if (defaultColorInput) {
+            defaultColorInput.checked = true;
+            hideCustomColorInput();
+        }
+    }
+
+    function removeCurrentAvatar() {
+        // Hide the current avatar preview
+        const avatarPreview = document.querySelector('.current-avatar');
+        if (avatarPreview) {
+            avatarPreview.style.display = 'none';
+        }
+
+        // Clear the file input
+        const fileInput = document.getElementById('avatar');
+        if (fileInput) {
+            fileInput.value = '';
+        }
+
+        // Set the remove flag
+        const removeFlag = document.getElementById('removeAvatarFlag');
+        if (removeFlag) {
+            removeFlag.value = 'true';
+        }
+
+        // Hide the remove button
+        const avatarActions = document.querySelector('.avatar-actions');
+        if (avatarActions) {
+            avatarActions.style.display = 'none';
+        }
+    }
+
+
+    // Initialize custom color functionality
+    (function() {
+        const customColorOption = document.querySelector('.custom-color-option');
+        
+        // Add click handler for custom color option
+        customColorOption.addEventListener('click', () => {
+            const customColorRadio = document.getElementById('customColorRadio');
+            const customColorInput = document.getElementById('customColorInput');
+            
+            customColorRadio.checked = true;
+            showCustomColorInput();
+            
+            if (!customColorRadio.value) {
+                updateCustomColor(customColorInput.value);
+            }
+        });
+        
+        // Add change handlers for other color options to hide custom input
+        document.querySelectorAll('input[name="color"]:not(#customColorRadio)').forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.checked) {
+                    hideCustomColorInput();
+                }
+            });
+        });
+    })();
+</script>
+</body>
+</html>

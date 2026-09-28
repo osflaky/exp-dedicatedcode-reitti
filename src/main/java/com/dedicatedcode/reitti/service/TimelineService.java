@@ -1,0 +1,182 @@
+package com.dedicatedcode.reitti.service;
+
+import com.dedicatedcode.reitti.dto.timeline.SingleTimelineEntry;
+import com.dedicatedcode.reitti.model.UnitSystem;
+import com.dedicatedcode.reitti.model.geo.*;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.model.security.UserSettings;
+import com.dedicatedcode.reitti.repository.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import tools.jackson.core.JacksonException;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+@Service
+public class TimelineService {
+    private static final Logger log = LoggerFactory.getLogger(TimelineService.class);
+    private final ProcessedVisitJdbcService processedVisitJdbcService;
+    private final PreviewProcessedVisitJdbcService previewProcessedVisitJdbcService;
+    private final TripJdbcService tripJdbcService;
+    private final PreviewTripJdbcService previewTripJdbcService;
+    private final UserSettingsJdbcService userSettingsJdbcService;
+    private final I18nService i18n;
+
+    public TimelineService(ProcessedVisitJdbcService processedVisitJdbcService,
+                           PreviewProcessedVisitJdbcService previewProcessedVisitJdbcService,
+                           TripJdbcService tripJdbcService,
+                           PreviewTripJdbcService previewTripJdbcService,
+                           UserSettingsJdbcService userSettingsJdbcService,
+                           I18nService i18n) {
+        this.processedVisitJdbcService = processedVisitJdbcService;
+        this.previewProcessedVisitJdbcService = previewProcessedVisitJdbcService;
+        this.tripJdbcService = tripJdbcService;
+        this.previewTripJdbcService = previewTripJdbcService;
+        this.userSettingsJdbcService = userSettingsJdbcService;
+        this.i18n = i18n;
+    }
+
+    public List<SingleTimelineEntry> buildTimelineEntries(User user, String previewId, ZoneId userTimeZone, LocalDate selectedDate, Instant startOfDay, Instant endOfDay, boolean ownData) {
+        List<ProcessedVisit> processedVisits = previewProcessedVisitJdbcService.findByUserAndTimeOverlap(user, previewId, startOfDay, endOfDay);
+        List<Trip> trips = previewTripJdbcService.findByUserAndTimeOverlap(user, previewId, startOfDay, endOfDay);
+
+        UserSettings userSettings = userSettingsJdbcService.findByUserId(user.getId())
+                .orElse(UserSettings.defaultSettings(user.getId()));
+        try {
+            return buildTimelineEntries(processedVisits, trips, userTimeZone, selectedDate, userSettings, ownData);
+        } catch (JacksonException e) {
+            log.error("Unable to build timeline entries.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    public List<SingleTimelineEntry> buildTimelineEntries(User user, ZoneId userTimeZone, LocalDate selectedDate, Instant startOfDay, Instant endOfDay, boolean ownData) {
+
+        List<ProcessedVisit> processedVisits = processedVisitJdbcService.findByUserAndTimeOverlap(user, startOfDay, endOfDay);
+        List<Trip> trips = tripJdbcService.findByUserAndTimeOverlap(user, startOfDay, endOfDay);
+
+        UserSettings userSettings = userSettingsJdbcService.findByUserId(user.getId())
+                .orElse(UserSettings.defaultSettings(user.getId()));
+        try {
+            return buildTimelineEntries(processedVisits, trips, userTimeZone, selectedDate, userSettings, ownData);
+        } catch (JacksonException e) {
+            log.error("Unable to build timeline entries.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Build timeline entries from processed visits and trips
+     */
+    private List<SingleTimelineEntry> buildTimelineEntries(List<ProcessedVisit> processedVisits, List<Trip> trips, ZoneId timezone, LocalDate selectedDate, UserSettings userSettings, boolean ownData) throws JacksonException {
+        List<SingleTimelineEntry> entries = new ArrayList<>();
+
+        for (ProcessedVisit visit : processedVisits) {
+            SignificantPlace place = visit.getPlace();
+            if (place != null) {
+                SingleTimelineEntry entry = new SingleTimelineEntry();
+                entry.setId("visit-" + visit.getId());
+                entry.setResourceId(visit.getId());
+                entry.setType(SingleTimelineEntry.Type.VISIT);
+                entry.setPlace(place);
+                entry.setStartTime(visit.getStartTime());
+                entry.setStartTimezone(visit.getPlace().getTimezone());
+                entry.setEndTime(visit.getEndTime());
+                entry.setEndTimezone(visit.getPlace().getTimezone());
+                entry.setFormattedTimeRange(TimeUtil.formatTimeRange(visit.getStartTime(), visit.getEndTime(), timezone, selectedDate, userSettings));
+                entry.setFormattedLocalTimeRange(TimeUtil.formatTimeRange(visit.getStartTime(), visit.getEndTime(), visit.getPlace().getTimezone(), selectedDate, userSettings));
+                entry.setFormattedDuration(formatDuration(visit.getStartTime(), visit.getEndTime()));
+                entry.setEditable(ownData);
+                entries.add(entry);
+            }
+        }
+
+        // Add trips to timeline
+        for (Trip trip : trips) {
+            SingleTimelineEntry entry = new SingleTimelineEntry();
+            entry.setId("trip-" + trip.getId());
+            entry.setResourceId(trip.getId());
+            entry.setType(SingleTimelineEntry.Type.TRIP);
+            entry.setStartTime(trip.getStartTime());
+            entry.setStartTimezone(trip.getStartVisit().getPlace().getTimezone());
+            entry.setEndTime(trip.getEndTime());
+            entry.setEndTimezone(trip.getEndVisit().getPlace().getTimezone());
+            entry.setFormattedTimeRange(TimeUtil.formatTimeRange(trip.getStartTime(), trip.getEndTime(), timezone, selectedDate, userSettings));
+            entry.setFormattedDuration(formatDuration(trip.getStartTime(), trip.getEndTime()));
+            entry.setFormattedLocalTimeRange(TimeUtil.formatTimeRange(trip.getStartTime(), trip.getEndTime(), trip.getStartVisit().getPlace().getTimezone(), trip.getEndVisit().getPlace().getTimezone(), selectedDate, userSettings));
+            entry.setEditable(ownData);
+
+            if (trip.getTravelledDistanceMeters() != null) {
+                entry.setDistanceMeters(trip.getTravelledDistanceMeters());
+                entry.setFormattedDistance(formatDistance(trip.getTravelledDistanceMeters(), userSettings.getUnitSystem()));
+            } else if (trip.getEstimatedDistanceMeters() != null) {
+                entry.setDistanceMeters(trip.getEstimatedDistanceMeters());
+                entry.setFormattedDistance(formatDistance(trip.getEstimatedDistanceMeters(), userSettings.getUnitSystem()));
+            }
+
+            entry.setTransportModeSegments(trip.getSegments());
+            TransportMode dominant = trip.getSegments().stream()
+                    .max(Comparator.comparingLong(TransportModeSegment::durationSeconds))
+                    .map(TransportModeSegment::mode)
+                    .orElse(null);
+            entry.setTransportMode(dominant);
+
+            entries.add(entry);
+        }
+
+        entries.sort(Comparator.comparing(SingleTimelineEntry::getStartTime));
+
+        return entries;
+    }
+
+    /**
+     * Format duration for display (this is a simple implementation, you might want to use HumanizeDuration)
+     */
+    private String formatDuration(Instant startTime, Instant endTime) {
+        long durationMinutes = java.time.Duration.between(startTime, endTime).toMinutes();
+        long hours = durationMinutes / 60;
+        long minutes = durationMinutes % 60;
+
+        if (hours > 0) {
+            return i18n.translate("common.duration.long", hours, minutes);
+        } else {
+            return i18n.translate("common.duration.short", minutes);
+        }
+    }
+
+    /**
+     * Format distance according to unit system
+     */
+    private String formatDistance(Double distanceMeters, UnitSystem unitSystem) {
+        if (distanceMeters == null) {
+            return "";
+        }
+
+        switch (unitSystem) {
+            case METRIC:
+                if (distanceMeters >= 1000) {
+                    return i18n.translate("common.distance.km", distanceMeters / 1000.0);
+                } else {
+                    return i18n.translate("common.distance.m", distanceMeters);
+                }
+            case IMPERIAL:
+                double distanceFeet = distanceMeters * 3.28084;
+                if (distanceFeet >= 5280) {
+                    double distanceMiles = distanceFeet / 5280.0;
+                    return i18n.translate("common.distance.mi", distanceMiles);
+                } else {
+                    return i18n.translate("common.distance.ft", distanceFeet);
+                }
+            default:
+                throw new IllegalArgumentException("Unknown distance unit: " + unitSystem);
+        }
+    }
+
+}

@@ -1,0 +1,106 @@
+package com.dedicatedcode.reitti.controller.api;
+
+import com.dedicatedcode.reitti.dto.ReittiRemoteInfo;
+import com.dedicatedcode.reitti.dto.SubscriptionRequest;
+import com.dedicatedcode.reitti.dto.SubscriptionResponse;
+import com.dedicatedcode.reitti.dto.timeline.SingleTimelineEntry;
+import com.dedicatedcode.reitti.model.NotificationData;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.repository.UserJdbcService;
+import com.dedicatedcode.reitti.service.TimelineService;
+import com.dedicatedcode.reitti.service.UserNotificationService;
+import com.dedicatedcode.reitti.service.VersionService;
+import com.dedicatedcode.reitti.service.integration.ReittiIntegrationService;
+import com.dedicatedcode.reitti.service.integration.ReittiSubscriptionService;
+import jakarta.validation.Valid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/v1/reitti-integration")
+public class ReittiIntegrationApiController {
+    private static final Logger log = LoggerFactory.getLogger(ReittiIntegrationApiController.class);
+    private final VersionService versionService;
+    private final TimelineService timelineService;
+    private final ReittiSubscriptionService subscriptionService;
+    private final ReittiIntegrationService integrationService;
+    private final UserNotificationService userNotificationService;
+    private final UserJdbcService userJdbcService;
+
+    public ReittiIntegrationApiController(VersionService versionService,
+                                          TimelineService timelineService,
+                                          ReittiSubscriptionService subscriptionService,
+                                          ReittiIntegrationService integrationService,
+                                          UserNotificationService userNotificationService,
+                                          UserJdbcService userJdbcService) {
+        this.versionService = versionService;
+        this.timelineService = timelineService;
+        this.subscriptionService = subscriptionService;
+        this.integrationService = integrationService;
+        this.userNotificationService = userNotificationService;
+        this.userJdbcService = userJdbcService;
+    }
+
+    @GetMapping("/info")
+    public ResponseEntity<ReittiRemoteInfo> getInfo(@AuthenticationPrincipal User user) {
+        ReittiRemoteInfo.RemoteUserInfo userInfo = new ReittiRemoteInfo.RemoteUserInfo(user.getId(), user.getUsername(), user.getDisplayName(), user.getVersion());
+        ReittiRemoteInfo.RemoteServerInfo serverInfo = new ReittiRemoteInfo.RemoteServerInfo("Reitti", this.versionService.getVersion(), LocalDateTime.now());
+        return ResponseEntity.ok(new ReittiRemoteInfo(userInfo, serverInfo));
+    }
+
+    @GetMapping("/timeline")
+    public List<SingleTimelineEntry> getTimeline(@AuthenticationPrincipal User user,
+                                                 @RequestParam String startDate,
+                                                 @RequestParam String endDate,
+                                                 @RequestParam(required = false, defaultValue = "UTC") String timezone) {
+
+        ZoneId userTimezone = ZoneId.of(timezone);
+
+        LocalDate selectedStartDate = LocalDate.parse(startDate);
+        LocalDate selectedEndDate = LocalDate.parse(endDate);
+
+        Instant startOfRange = selectedStartDate.atStartOfDay(userTimezone).toInstant();
+        Instant endOfRange = selectedEndDate.plusDays(1).atStartOfDay(userTimezone).toInstant().minusMillis(1);
+
+        return this.timelineService.buildTimelineEntries(user, userTimezone, selectedStartDate, startOfRange, endOfRange, false);
+    }
+
+    @PostMapping("/subscribe")
+    public ResponseEntity<SubscriptionResponse> subscribe(@AuthenticationPrincipal User user,
+                                                         @Valid @RequestBody SubscriptionRequest request) {
+        SubscriptionResponse response = subscriptionService.createSubscription(user, request.getCallbackUrl());
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/notify/{subscriptionId}")
+    public ResponseEntity<Void> notify(@PathVariable String subscriptionId,
+                                      @RequestBody NotificationData notificationData) {
+        try {
+            Optional<Long> userId = this.integrationService.getUserIdForSubscription(subscriptionId);
+
+            if (userId.isEmpty()) {
+                log.warn("Subscription with id {} not found", subscriptionId);
+                return ResponseEntity.notFound().build();
+            }
+
+            this.userJdbcService.findById(userId.get()).ifPresentOrElse(user -> {
+                this.userNotificationService.sendToQueue(user, notificationData.getAffectedDates(), notificationData.getEventType(), null);
+            }, () -> log.warn("Unable to find user for [{}]", subscriptionId));
+
+            return ResponseEntity.ok().build();
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+}

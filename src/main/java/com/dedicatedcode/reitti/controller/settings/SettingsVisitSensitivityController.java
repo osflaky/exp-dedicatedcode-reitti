@@ -1,0 +1,313 @@
+package com.dedicatedcode.reitti.controller.settings;
+
+import com.dedicatedcode.reitti.dto.ConfigurationForm;
+import com.dedicatedcode.reitti.model.Role;
+import com.dedicatedcode.reitti.model.UserType;
+import com.dedicatedcode.reitti.model.processing.DetectionParameter;
+import com.dedicatedcode.reitti.model.processing.RecalculationState;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.repository.RawLocationPointJdbcService;
+import com.dedicatedcode.reitti.repository.VisitDetectionParametersJdbcService;
+import com.dedicatedcode.reitti.service.VisitDetectionPreviewService;
+import com.dedicatedcode.reitti.service.jobs.JobSchedulingService;
+import com.dedicatedcode.reitti.service.jobs.JobType;
+import com.dedicatedcode.reitti.service.jobs.VisitSensitivityConfigurationRecalculationTask;
+import org.quartz.JobDetail;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.MessageSource;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+
+@Controller
+@RequestMapping("/settings/visit-sensitivity")
+public class SettingsVisitSensitivityController {
+
+    private static final Logger log = LoggerFactory.getLogger(SettingsVisitSensitivityController.class);
+    private final VisitDetectionParametersJdbcService configurationService;
+    private final VisitDetectionPreviewService visitDetectionPreviewService;
+
+    private final MessageSource messageSource;
+    private final boolean dataManagementEnabled;
+    private final JobSchedulingService jobScheduler;
+    private final RawLocationPointJdbcService rawLocationPointJdbcService;
+    private final JobDetail visitSensitivityRecalculationTask;
+
+    public SettingsVisitSensitivityController(VisitDetectionParametersJdbcService configurationService,
+                                              VisitDetectionPreviewService visitDetectionPreviewService,
+                                              MessageSource messageSource,
+                                              @Value("${reitti.data-management.enabled:false}") boolean dataManagementEnabled,
+                                              JobSchedulingService jobScheduler,
+                                              RawLocationPointJdbcService rawLocationPointJdbcService,
+                                              @Qualifier("visitSensitivityRecalculationJob") JobDetail visitSensitivityRecalculationTask) {
+        this.configurationService = configurationService;
+        this.visitDetectionPreviewService = visitDetectionPreviewService;
+        this.messageSource = messageSource;
+        this.dataManagementEnabled = dataManagementEnabled;
+        this.jobScheduler = jobScheduler;
+        this.rawLocationPointJdbcService = rawLocationPointJdbcService;
+        this.visitSensitivityRecalculationTask = visitSensitivityRecalculationTask;
+    }
+    
+    @GetMapping
+    public String visitSensitivitySettings(@AuthenticationPrincipal User user, Model model) {
+        if (user.getUserType() == UserType.LIVE_DATA_ONLY) {
+            model.addAttribute("activeSection", "visit-sensitivity");
+            model.addAttribute("isAdmin", user.getRole() == Role.ADMIN);
+            model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+            return "settings/unavailable";
+        }
+        List<DetectionParameter> detectionParameters = configurationService.findAllConfigurationsForUser(user);
+        
+        model.addAttribute("isAdmin", user.getRole() ==  Role.ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        model.addAttribute("configurations", detectionParameters);
+        model.addAttribute("activeSection", "visit-sensitivity");
+        model.addAttribute("recalculationAdvised", detectionParameters.stream().anyMatch(this::calculateNeedsConfiguration));
+        return "settings/visit-sensitivity";
+    }
+    
+    @GetMapping("/edit/{id}")
+    public String editConfiguration(@PathVariable Long id,
+                                    @RequestParam(required = false, name = "new-mode") String mode,
+                                    @RequestParam(required = false, defaultValue = "UTC") String timezone,
+                                    @RequestParam(required = false) Integer sensitivityLevel,
+                                    @AuthenticationPrincipal User user,
+                                    Model model) {
+        ZoneId userTimezone = ZoneId.of(timezone);
+
+        DetectionParameter config = configurationService.findById(id, user).orElseThrow(() -> new IllegalArgumentException("Configuration not found"));
+
+        ConfigurationForm form = ConfigurationForm.fromConfiguration(config, userTimezone);
+        
+        String effectiveMode = mode != null ? mode : form.getMode();
+
+        if (sensitivityLevel != null && "advanced".equals(effectiveMode)) {
+            form.applySensitivityLevel(sensitivityLevel);
+        }
+
+        model.addAttribute("configurationForm", form);
+        model.addAttribute("mode", effectiveMode);
+        model.addAttribute("isDefaultConfig", config.getValidSince() == null);
+
+        return "fragments/configuration-form :: configuration-form";
+    }
+    
+    @GetMapping("/new")
+    public String newConfiguration(@RequestParam(defaultValue = "simple", name = "new-mode") String mode,
+                                   @RequestParam(required = false, defaultValue = "UTC") String timezone,
+                                   Model model) {
+        ConfigurationForm form = new ConfigurationForm();
+        form.setValidSince(Instant.now().atZone(ZoneId.of(timezone)).toLocalDate());
+
+        model.addAttribute("configurationForm", form);
+        model.addAttribute("mode", mode);
+        model.addAttribute("isDefaultConfig", false);
+        
+        return "fragments/configuration-form :: configuration-form";
+    }
+    
+    @PostMapping("/save")
+    public String saveConfiguration(@ModelAttribute ConfigurationForm form,
+                                    @RequestParam(required = false, defaultValue = "UTC") String timezone,
+                                    @AuthenticationPrincipal User user,
+                                    Model model) {
+        try {
+            DetectionParameter config = form.toConfiguration(ZoneId.of(timezone));
+
+            String validationError = validateConfiguration(config, user);
+            if (validationError != null) {
+                model.addAttribute("errorMessage", validationError);
+            } else {
+                if (config.getId() == null) {
+                    if (this.rawLocationPointJdbcService.containsDataAfter(user, config.getValidSince())) {
+                        config = config.withRecalculationState(RecalculationState.NEEDED);
+                    }
+                    configurationService.saveConfiguration(user, config);
+                } else {
+                    // Existing configuration - check if it has changed
+                    DetectionParameter originalConfig = configurationService.findById(config.getId(), user)
+                            .orElseThrow(() -> new IllegalArgumentException("Configuration not found"));
+                    if (form.hasConfigurationChanged(originalConfig)) {
+                        config = config.withRecalculationState(RecalculationState.NEEDED);
+
+                    }
+                    configurationService.updateConfiguration(config);
+                }
+                model.addAttribute("successMessage", "Configuration saved successfully. Changes will apply to new incoming data.");
+            }
+        } catch (Exception e) {
+            String errorMessage = messageSource.getMessage("visit.sensitivity.validation.save.error",
+                new Object[]{e.getMessage()}, LocaleContextHolder.getLocale());
+            model.addAttribute("errorMessage", errorMessage);
+        }
+
+        List<DetectionParameter> detectionParameters = configurationService.findAllConfigurationsForUser(user);
+        model.addAttribute("configurations", detectionParameters);
+        model.addAttribute("activeSection", "visit-sensitivity");
+        model.addAttribute("isAdmin", user.getRole() ==  Role.ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        model.addAttribute("recalculationAdvised", detectionParameters.stream().anyMatch(this::calculateNeedsConfiguration));
+
+        return "settings/visit-sensitivity";
+    }
+
+    private boolean calculateNeedsConfiguration(DetectionParameter config) {
+        return config.getRecalculationState() == RecalculationState.NEEDED;
+    }
+
+    @DeleteMapping("/{id}")
+    public String deleteConfiguration(@PathVariable Long id, Authentication auth, Model model) {
+        User user = (User) auth.getPrincipal();
+        
+        List<DetectionParameter> detectionParameters = configurationService.findAllConfigurationsForUser(user);
+        DetectionParameter config = detectionParameters.stream()
+            .filter(c -> c.getId().equals(id))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Configuration not found"));
+        
+        if (config.getValidSince() == null) {
+            throw new IllegalArgumentException("Cannot delete default configuration");
+        }
+
+        configurationService.delete(id);
+
+        DetectionParameter newLatest = this.configurationService.findCurrent(user, config.getValidSince());
+        if (this.rawLocationPointJdbcService.containsData(user, newLatest.getValidSince(), config.getValidSince())) {
+            this.configurationService.updateConfiguration(newLatest.withRecalculationState(RecalculationState.NEEDED));
+        }
+        detectionParameters = configurationService.findAllConfigurationsForUser(user);
+        model.addAttribute("configurations", detectionParameters);
+        model.addAttribute("successMessage", "Configuration deleted successfully.");
+        model.addAttribute("activeSection", "visit-sensitivity");
+        model.addAttribute("isAdmin", user.getRole() == Role.ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        model.addAttribute("recalculationAdvised", detectionParameters.stream().anyMatch(this::calculateNeedsConfiguration));
+
+        return "settings/visit-sensitivity";
+    }
+    
+    @PostMapping("/recalculate")
+    public String startRecalculation(@AuthenticationPrincipal User user, Model model) {
+        try {
+            clearTimeRange(user);
+            model.addAttribute("successMessage", messageSource.getMessage("visit.sensitivity.recalculation.started", null, LocaleContextHolder.getLocale()));
+        } catch (Exception e) {
+            model.addAttribute("errorMessage", messageSource.getMessage("visit.sensitivity.recalculation.error", new Object[]{e.getMessage()}, LocaleContextHolder.getLocale()));
+        }
+
+        List<DetectionParameter> detectionParameters = this.configurationService.findAllConfigurationsForUser(user);
+        model.addAttribute("configurations", detectionParameters);
+        model.addAttribute("activeSection", "visit-sensitivity");
+        model.addAttribute("isAdmin", user.getRole() == Role.ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        model.addAttribute("recalculationAdvised", detectionParameters.stream().anyMatch(this::calculateNeedsConfiguration));
+        
+        return "settings/visit-sensitivity";
+    }
+    
+    @PostMapping("/dismiss-recalculation")
+    public String dismissRecalculation(@AuthenticationPrincipal User user, Model model) {
+        try {
+            this.configurationService.findAllConfigurationsForUser(user)
+                    .forEach(config -> this.configurationService.updateConfiguration(config.withRecalculationState(RecalculationState.DONE)));
+            model.addAttribute("successMessage", messageSource.getMessage("visit.sensitivity.recalculation.dismissed", null, LocaleContextHolder.getLocale()));
+        } catch (Exception e) {
+            model.addAttribute("errorMessage", messageSource.getMessage("visit.sensitivity.recalculation.error", new Object[]{e.getMessage()}, LocaleContextHolder.getLocale()));
+        }
+        
+        List<DetectionParameter> detectionParameters = configurationService.findAllConfigurationsForUser(user);
+        model.addAttribute("configurations", detectionParameters);
+        model.addAttribute("activeSection", "visit-sensitivity");
+        model.addAttribute("isAdmin", user.getRole() == Role.ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        model.addAttribute("recalculationAdvised", detectionParameters.stream().anyMatch(this::calculateNeedsConfiguration));
+        
+        return "settings/visit-sensitivity";
+    }
+    
+    @PostMapping("/preview")
+    public String previewConfiguration(@ModelAttribute ConfigurationForm form,
+                                       @RequestParam(required = false, defaultValue = "UTC") String timezone,
+                                       @RequestParam(required = false) String previewDate,
+                                       @AuthenticationPrincipal User user,
+                                       Model model) {
+        DetectionParameter config = form.toConfiguration(ZoneId.of(timezone));
+
+        Instant date = previewDate != null ? ZonedDateTime.of(LocalDate.parse(previewDate).atStartOfDay(), ZoneId.of(timezone)).toInstant() : Instant.now().truncatedTo(ChronoUnit.DAYS);
+        String effectivePreviewDate = previewDate != null ? previewDate :
+            Instant.now().atZone(ZoneId.of(timezone)).toLocalDate().toString();
+
+        String previewId = this.visitDetectionPreviewService.startPreview(user, config, date);
+        
+        model.addAttribute("previewConfig", config);
+        model.addAttribute("previewId", previewId);
+        model.addAttribute("previewDate", effectivePreviewDate);
+        model.addAttribute("userId", user.getId());
+        return "fragments/configuration-preview :: configuration-preview";
+    }
+
+    private void clearTimeRange(User user) {
+        List<DetectionParameter> allConfigurationsForUser = this.configurationService.findAllConfigurationsForUser(user);
+
+        List<DetectionParameter> needsRecalculation = allConfigurationsForUser.stream()
+                .filter(dp -> dp.getRecalculationState() == RecalculationState.NEEDED).toList().reversed();
+
+        if (needsRecalculation.isEmpty()) {
+            throw new IllegalArgumentException("No configuration needs recalculation");
+        }
+
+        needsRecalculation.forEach(dp -> this.configurationService.updateConfiguration(dp.withRecalculationState(RecalculationState.RUNNING)));
+
+        log.debug("Scheduling recalculation task");
+        this.jobScheduler.enqueueTask(visitSensitivityRecalculationTask,
+                                      new VisitSensitivityConfigurationRecalculationTask.TaskData(user.getId()),
+                                      JobSchedulingService.Metadata.builder()
+                                              .user(user)
+                                              .friendlyName("Recalculation for changed VisitSensitivity settings")
+                                              .jobType(JobType.DATA_RECALCULATION).build());
+
+        log.debug("Recalculation of all configurations triggered");
+    }
+
+    private String validateConfiguration(DetectionParameter config, User user) {
+        if (config.getValidSince() == null) {
+            return null;
+        }
+
+        if (config.getId() == null) {
+            List<DetectionParameter> existingConfigs = configurationService.findAllConfigurationsForUser(user);
+            boolean dateExists = existingConfigs.stream()
+                .anyMatch(existing -> existing.getValidSince() != null && 
+                         existing.getValidSince().equals(config.getValidSince()));
+            
+            if (dateExists) {
+                return messageSource.getMessage("visit.sensitivity.validation.date.duplicate", null, LocaleContextHolder.getLocale());
+            }
+        } else {
+            List<DetectionParameter> existingConfigs = configurationService.findAllConfigurationsForUser(user);
+            boolean dateExists = existingConfigs.stream()
+                .anyMatch(existing -> existing.getValidSince() != null && 
+                         existing.getValidSince().equals(config.getValidSince()) &&
+                         !existing.getId().equals(config.getId()));
+            
+            if (dateExists) {
+                return messageSource.getMessage("visit.sensitivity.validation.date.duplicate", null, LocaleContextHolder.getLocale());
+            }
+        }
+        return null;
+    }
+}

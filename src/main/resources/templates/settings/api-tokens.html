@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="#{settings.title}">Settings - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="apple-touch-icon" th:href="@{/img/logo.svg}">
+    <link rel="shortcut icon" type="image/x-icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}">
+    <script th:src="@{/js/messages.js(v=${appVersion})}"></script>
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+    <script th:src="@{/js/util.js}"></script>
+</head>
+<body class="settings-page">
+<div class="navigation-container" th:replace="~{fragments/main-navigation :: main-navigation('settings')}"></div>
+<div class="settings-container">
+    <div th:replace="~{fragments/settings-navigation :: settings-nav(${activeSection}, ${dataManagementEnabled}, ${isAdmin})}"></div>
+    <div class="settings-content-area">
+        <div id="api-tokens" class="settings-section active">
+            <div th:fragment="api-tokens-content">
+                <h2 th:text="#{tokens.title}">API Tokens</h2>
+
+                <div th:if="${successMessage}" class="alert alert-success" style="display: block;">
+                    <span th:text="${successMessage}">Token created successfully</span>
+                </div>
+                <div th:if="${errorMessage}" class="alert alert-danger" style="display: block;">
+                    <span th:text="${errorMessage}">Error message</span>
+                </div>
+
+
+                <div class="settings-card" th:if="${tokens.isEmpty()}">
+                    <p th:text="#{tokens.no.tokens}">No API tokens found. Create one to get started.</p>
+                </div>
+
+                <div class="settings-card">
+                    <table th:if="${!tokens.isEmpty()}">
+                        <thead>
+                        <tr>
+                            <th th:text="#{tokens.table.name}">Name</th>
+                            <th th:text="#{tokens.table.token}">Token</th>
+                            <th th:text="#{tokens.table.created}">Created</th>
+                            <th th:text="#{tokens.table.last.used}">Last Used</th>
+                            <th th:text="#{tokens.table.actions}">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr th:each="token : ${tokens}">
+                            <td th:text="${token.name()}"></td>
+                            <td th:text="${token.token()}"></td>
+                            <td th:text="${#temporals.format(token.createdAt(), 'yyyy-MM-dd HH:mm')}"></td>
+                            <td th:text="${token.lastUsedAt() != null ? #temporals.format(token.lastUsedAt(), 'yyyy-MM-dd HH:mm') : 'Never'}"></td>
+                            <td>
+                                <button class="btn"
+                                        th:attr="hx-get=@{/settings/api-tokens/{id}/edit(id=${token.id()})}"
+                                        hx-target="#token-form-container"
+                                        hx-swap="innerHTML"
+                                        hx-vals='js:{"timezone": getUserTimezone()}'
+                                        th:text="#{form.edit}">Edit
+                                </button>
+                                <th:block  th:if="${token.deviceId() != null}">
+                                    <span class="token-device-linked">
+                                        <a th:href="@{/settings/devices}" class="btn" th:text="#{tokens.link.to.device}">View Device</a>
+                                    </span>
+                                    <span class="token-device-linked">
+                                        <button class="btn btn-warning"
+                                                th:attr="hx-post=@{/settings/api-tokens/{id}/detach/{deviceId}(id=${token.id()},deviceId=${token.deviceId()})}, hx-confirm=#{tokens.detach.confirm(${token.deviceName()})}"
+                                                hx-target="#api-tokens"
+                                                hx-vals='js:{"timezone": getUserTimezone()}'
+                                                hx-swap="innerHTML"
+                                                th:text="#{tokens.link.device.detach(${token.deviceName()})}">View Device</button>
+                                    </span>
+                                </th:block>
+
+                                <th:block th:if="${token.deviceId() == null}">
+                                    <button class="btn btn-primary"
+                                            th:attr="hx-get=@{/settings/api-tokens/{id}/link-form(id=${token.id()})}"
+                                            hx-target="closest td"
+                                            hx-swap="innerHTML"
+                                            hx-vals='js:{"timezone": getUserTimezone()}'
+                                    th:text="#{tokens.link.device.attach}">Link to Device</button>
+                                </th:block>
+                                <span th:unless="${token.deviceId() != null}">
+                                    <button class="btn btn-danger"
+                                            th:attr="hx-post=@{/settings/api-tokens/{id}/delete(id=${token.id()})}, hx-confirm=#{tokens.delete.confirm}"
+                                            hx-target="#api-tokens"
+                                            hx-vals='js:{"timezone": getUserTimezone()}'
+                                            hx-swap="innerHTML"
+                                            th:text="#{form.delete}">Delete
+                                    </button>
+                                </span>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="settings-card" id="token-form-container">
+                    <div th:replace="~{settings/fragments/api-tokens :: token-form-container}"></div>
+                </div>
+
+
+                <div th:attr="hx-get=@{/settings/api-tokens/usages}" hx-trigger="load, every 10s" hx-vals='js:{"timezone": getUserTimezone()}'>
+                    <div th:fragment="api-token-usages" class="settings-card">
+                        <h3 th:text="#{tokens.recent.usages.title}">Recent Token Usages</h3>
+                        <p th:text="#{tokens.recent.usages.description(${maxUsagesToShow})}">Showing the last 10 token usages</p>
+                        <table>
+                            <thead>
+                            <tr>
+                                <th th:text="#{tokens.usage.table.token}">Token</th>
+                                <th th:text="#{tokens.usage.table.device}">Device</th>
+                                <th th:text="#{tokens.usage.table.timestamp}">Timestamp</th>
+                                <th th:text="#{tokens.usage.table.endpoint}">Endpoint</th>
+                                <th th:text="#{tokens.usage.table.ip}">IP Address</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr th:each="usage : ${recentUsages}">
+                                <td th:text="${usage.name()}"></td>
+                                <td th:text="${usage.device()}"></td>
+                                <td th:text="${#temporals.format(usage.at(), 'yyyy-MM-dd HH:mm:ss')}"></td>
+                                <td th:text="${usage.endpoint()}"></td>
+                                <td th:text="${usage.ip()}"></td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+    </div>
+</div>
+<script th:inline="javascript">
+    window.userSettings = /*[[${userSettings}]]*/ {}
+</script>
+</body>
+</html>

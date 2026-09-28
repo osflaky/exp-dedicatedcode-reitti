@@ -1,0 +1,112 @@
+package com.dedicatedcode.reitti.config;
+
+import com.dedicatedcode.reitti.config.security.*;
+import com.dedicatedcode.reitti.model.Role;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
+import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private TokenAuthenticationFilter bearerTokenAuthFilter;
+
+    @Autowired
+    private UrlTokenAuthenticationFilter urlTokenAuthenticationFilter;
+
+    @Autowired
+    private MagicLinkAuthenticationFilter magicLinkAuthenticationFilter;
+
+    @Autowired
+    private MagicLinkSessionValidationFilter magicLinkSessionValidationFilter;
+
+    @Autowired
+    private CustomAuthenticationSuccessHandler customAuthenticationSuccessHandler;
+
+    @Autowired
+    private SetupFilter setupFilter;
+
+    @Autowired
+    private HtmxAuthenticationEntryPoint authenticationEntryPoint;
+
+    @Autowired(required = false)
+    private LogoutSuccessHandler oidcLogoutSuccessHandler;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .authorizeHttpRequests(authorize -> authorize
+                        .requestMatchers("/login", "/access", "/error").permitAll()
+                        .requestMatchers("/settings/integrations/reitti.properties").hasAnyRole(Role.ADMIN.name(), Role.API_ACCESS.name(), Role.USER.name())
+                        .requestMatchers("/settings/logging", "/settings/logging/**").hasRole(Role.ADMIN.name())
+                        .requestMatchers("/settings/**").hasAnyRole(Role.ADMIN.name(), Role.USER.name())
+                        .requestMatchers("/api/v1/photos/**").hasAnyRole(Role.ADMIN.name(),
+                                Role.USER.name(),
+                                "MAGIC_LINK_FULL_ACCESS",
+                                "MAGIC_LINK_ONLY_LIVE_WITH_PHOTOS",
+                                "MAGIC_LINK_MEMORY_VIEW_ONLY",
+                                "MAGIC_LINK_MEMORY_EDIT_ACCESS")
+                        .requestMatchers("/memories/*/**").hasAnyRole(Role.ADMIN.name(),
+                                Role.USER.name(),
+                                "MAGIC_LINK_MEMORY_VIEW_ONLY",
+                                "MAGIC_LINK_MEMORY_EDIT_ACCESS")
+                        .requestMatchers("/memories").hasAnyRole(Role.ADMIN.name(), Role.USER.name())
+                        .requestMatchers("/api/v2/locations/stream/**").hasAnyRole(Role.ADMIN.name(), Role.USER.name(), "MAGIC_LINK_FULL_ACCESS")
+                        .requestMatchers("/api/v1/visits/**").hasAnyRole(Role.ADMIN.name(), Role.USER.name(), "MAGIC_LINK_FULL_ACCESS")
+                        .requestMatchers("/panoramax/**", "/api/v1/panoramax/**").hasAnyRole(Role.ADMIN.name(),
+                                Role.USER.name(),
+                                "MAGIC_LINK_FULL_ACCESS",
+                                "MAGIC_LINK_MEMORY_VIEW_ONLY",
+                                "MAGIC_LINK_MEMORY_EDIT_ACCESS")
+                        .requestMatchers("/css/**", "/js/**", "/images/**", "/fonts/**", "/img/**", "/error/magic-link/**", "/setup/**").permitAll()
+                        .requestMatchers("/actuator/health").permitAll()
+                        .requestMatchers("/api/v1/reitti-integration/notify/**").permitAll()
+                        .anyRequest().authenticated()
+                )
+                .addFilterBefore(magicLinkSessionValidationFilter, AuthorizationFilter.class)
+                .addFilterBefore(magicLinkAuthenticationFilter, MagicLinkSessionValidationFilter.class)
+                .addFilterBefore(bearerTokenAuthFilter, MagicLinkAuthenticationFilter.class)
+                .addFilterBefore(urlTokenAuthenticationFilter, TokenAuthenticationFilter.class)
+                .addFilterBefore(setupFilter, MagicLinkSessionValidationFilter.class)
+                .csrf(AbstractHttpConfigurer::disable)
+                .formLogin(form -> form
+                        .loginPage("/login")
+                        .successHandler(customAuthenticationSuccessHandler)
+                )
+                .rememberMe(rememberMe -> rememberMe
+                        .key("uniqueAndSecretKey")
+                        .tokenValiditySeconds(2592000) // 30 days
+                        .rememberMeParameter("remember-me")
+                        .useSecureCookie(false)
+                )
+                .exceptionHandling(exceptionHandling -> exceptionHandling.authenticationEntryPoint(authenticationEntryPoint))
+                .logout(logout -> {
+                    if (oidcLogoutSuccessHandler != null) {
+                        logout.logoutSuccessHandler(oidcLogoutSuccessHandler);
+                    }
+                    logout.deleteCookies("JSESSIONID", "remember-me")
+                          .permitAll();
+                });
+
+        // Apply OAuth2 configuration if OIDC is enabled
+        if (oidcLogoutSuccessHandler != null) {
+            http.oauth2Login(oauth2 -> oauth2
+                    .loginPage("/login")
+                    .successHandler(customAuthenticationSuccessHandler)
+            )
+            .oauth2Client(Customizer.withDefaults())
+            .oidcLogout((logout) -> logout.backChannel(Customizer.withDefaults()));
+        }
+
+        return http.build();
+    }
+}

@@ -1,0 +1,617 @@
+package com.dedicatedcode.reitti.controller.settings;
+
+import com.dedicatedcode.reitti.model.*;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.model.security.UserSettings;
+import com.dedicatedcode.reitti.repository.UserJdbcService;
+import com.dedicatedcode.reitti.repository.UserSettingsJdbcService;
+import com.dedicatedcode.reitti.service.AvatarService;
+import com.dedicatedcode.reitti.service.I18nService;
+import com.dedicatedcode.reitti.service.UserService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.LocaleResolver;
+
+import java.io.IOException;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static com.dedicatedcode.reitti.model.Role.ADMIN;
+
+@Controller
+@RequestMapping("/settings")
+public class UserSettingsController {
+
+    private final UserJdbcService userJdbcService;
+    private final UserService userService;
+    private final UserSettingsJdbcService userSettingsJdbcService;
+    private final LocaleResolver localeResolver;
+    private final AvatarService avatarService;
+    private final PasswordEncoder passwordEncoder;
+    private final boolean localLoginDisabled;
+    private final boolean oidcEnabled;
+    private final boolean dataManagementEnabled;
+    private final I18nService i18nService;
+
+
+    // Avatar constraints
+    private static final long MAX_AVATAR_SIZE = 2 * 1024 * 1024; // 2MB
+    private static final String[] ALLOWED_CONTENT_TYPES = {
+        "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"
+    };
+    private static final List<String> DEFAULT_AVATARS = Arrays.asList(
+        "avatar_man.jpg", "avatar_woman.jpg", "avatar_boy.jpg", "avatar_girl.jpg"
+    );
+    
+    // CSS file constraints
+    private static final long MAX_CSS_SIZE = 1024 * 1024; // 1MB
+    private static final String ALLOWED_CSS_CONTENT_TYPE = "text/css";
+    private final Map<String, String> defaultColors = new HashMap<>();
+
+    public UserSettingsController(UserJdbcService userJdbcService, UserService userService,
+                                  UserSettingsJdbcService userSettingsJdbcService,
+                                  I18nService i18nService,
+                                  LocaleResolver localeResolver,
+                                  AvatarService avatarService,
+                                  PasswordEncoder passwordEncoder,
+                                  @Value("${reitti.security.local-login.disable}") boolean localLoginDisabled,
+                                  @Value("${reitti.security.oidc.enabled:false}") boolean oidcEnabled,
+                                  @Value("${reitti.data-management.enabled:false}") boolean dataManagementEnabled) {
+        this.userJdbcService = userJdbcService;
+        this.userService = userService;
+        this.userSettingsJdbcService = userSettingsJdbcService;
+        this.i18nService = i18nService;
+        this.localeResolver = localeResolver;
+        this.avatarService = avatarService;
+        this.passwordEncoder = passwordEncoder;
+        this.localLoginDisabled = localLoginDisabled;
+        this.oidcEnabled = oidcEnabled;
+        this.dataManagementEnabled = dataManagementEnabled;
+        this.defaultColors.put("#f1ba63","Default Gold");
+        this.defaultColors.put("#4a90e2","Ocean Blue");
+        this.defaultColors.put("#7ed321","Fresh Green");
+        this.defaultColors.put("#f5a623","Warm Orange");
+        this.defaultColors.put("#bd10e0","Purple");
+        this.defaultColors.put("#b8e986","Light Green");
+        this.defaultColors.put("#50e3c2","Turquoise");
+        this.defaultColors.put("#e94b3c","Red");
+        this.defaultColors.put("#9013fe","Violet");
+        this.defaultColors.put("#417505","Forest Green");
+        this.defaultColors.put("#d0021b","Crimson");
+        this.defaultColors.put("#8b572a","Brow");
+    }
+
+    @GetMapping("/users-content")
+    public String getUsersContent(@AuthenticationPrincipal User user, Model model) {
+        return getUserContent(model, user);
+    }
+
+    @GetMapping("/user-management")
+    public String getUserManagementPage(@AuthenticationPrincipal User user, Model model) {
+        model.addAttribute("activeSection", "user-management");
+        model.addAttribute("isAdmin", user.getRole() == ADMIN);
+        model.addAttribute("dataManagementEnabled", dataManagementEnabled);
+        getUsersContent(user, model);
+        return "settings/user-management";
+    }
+
+    private String getUserContent(Model model, User currentUser) {
+        if (ADMIN != currentUser.getRole()) {
+            model.addAttribute("userId", currentUser.getId());
+            model.addAttribute("username", currentUser.getUsername());
+            model.addAttribute("displayName", currentUser.getDisplayName());
+            model.addAttribute("selectedRole", currentUser.getRole());
+            model.addAttribute("externallyManaged", currentUser.getExternalId() != null && oidcEnabled);
+            model.addAttribute("externalProfile", currentUser.getProfileUrl());
+            model.addAttribute("localLoginDisabled", localLoginDisabled);
+
+            UserSettings userSettings = userSettingsJdbcService.findByUserId(currentUser.getId()).orElse(UserSettings.defaultSettings(currentUser.getId()));
+            model.addAttribute("availableLanguages", Language.values());
+            model.addAttribute("selectedLanguage", userSettings.getSelectedLanguage());
+            model.addAttribute("selectedUnitSystem", userSettings.getUnitSystem().name());
+            model.addAttribute("homeLatitude", userSettings.getHomeLatitude());
+            model.addAttribute("homeLongitude", userSettings.getHomeLongitude());
+            model.addAttribute("unitSystems", UnitSystem.values());
+            model.addAttribute("hasAvatar", this.avatarService.getInfo(currentUser.getId()).isPresent());
+            model.addAttribute("hasCustomCss", StringUtils.hasText(userSettings.getCustomCss()));
+            model.addAttribute("defaultAvatars", DEFAULT_AVATARS);
+            model.addAttribute("isAdmin", false);
+            model.addAttribute("timeZoneOverride", userSettings.getTimeZoneOverride());
+            model.addAttribute("timeDisplayMode", userSettings.getTimeDisplayMode().name());
+            model.addAttribute("timeMode", userSettings.getTimeMode().name());
+            model.addAttribute("dayStartTime", userSettings.getDayStartTime());
+            model.addAttribute("availableTimezones", ZoneId.getAvailableZoneIds());
+            model.addAttribute("availableTimeDisplayModes", TimeDisplayMode.values());
+            model.addAttribute("availableTimeModes", TimeMode.values());
+            model.addAttribute("defaultColors", defaultColors);
+            model.addAttribute("selectedColor", userSettings.getColor());
+            return "fragments/user-management :: user-form-page";
+        }
+
+        List<User> users = userJdbcService.getAllUsers();
+        model.addAttribute("users", users);
+        model.addAttribute("currentUsername", currentUser.getUsername());
+        model.addAttribute("isAdmin", true);
+        model.addAttribute("addUserAvailable", !localLoginDisabled);
+        return "fragments/user-management :: users-list";
+    }
+
+    @PostMapping("/users/{userId}/delete")
+    public String deleteUser(@PathVariable Long userId, Authentication authentication, Model model) {
+        String currentUsername = authentication.getName();
+        User currentUser = userJdbcService.findByUsername(currentUsername)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + currentUsername));
+
+        // Only admins can delete users
+        if (ADMIN != currentUser.getRole()) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.access.denied"));
+            return getUserContent(model, currentUser);
+        }
+
+        // Prevent self-deletion
+        if (currentUser.getId().equals(userId)) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.user.self.delete"));
+        } else {
+            try {
+                User user = userJdbcService.findById(userId).orElseThrow();
+                userService.deleteUser(user);
+                model.addAttribute("successMessage", i18nService.translate("message.success.user.deleted"));
+            } catch (Exception e) {
+                model.addAttribute("errorMessage", i18nService.translate("message.error.user.deletion", e.getMessage()));
+            }
+        }
+
+        // Get updated user list and add to model
+        List<User> users = userJdbcService.getAllUsers();
+        model.addAttribute("users", users);
+        model.addAttribute("currentUsername", authentication.getName());
+        model.addAttribute("isAdmin", true);
+        model.addAttribute("addUserAvailable", !localLoginDisabled);
+
+        // Return the users-list fragment
+        return "fragments/user-management :: users-list";
+    }
+
+    @PostMapping("/users")
+    public String createUser(@RequestParam(required = false) String username,
+                             @RequestParam(required = false) String displayName,
+                             @RequestParam(required = false)  String password,
+                             @RequestParam(defaultValue = "USER") Role role,
+                             @RequestParam(name = "preferred_language") Language preferredLanguage,
+                             @RequestParam(name = "unit_system", defaultValue = "METRIC") String unitSystem,
+                             @RequestParam(required = false) Double homeLatitude,
+                             @RequestParam(required = false) Double homeLongitude,
+                             @RequestParam(name = "timezone_override", required = false) String timezoneOverride,
+                             @RequestParam(name = "time_display_mode", defaultValue = "DEFAULT") TimeDisplayMode timeDisplayMode,
+                             @RequestParam(name = "time_mode", defaultValue = "TWENTY_FOUR_HOUR") TimeMode timeMode,
+                             @RequestParam(name = "day_start_time", defaultValue = "00:00") String dayStartTime,
+                             @RequestParam(required = false) MultipartFile avatar,
+                             @RequestParam(required = false) String defaultAvatar,
+                             @RequestParam(required = false) MultipartFile customCss,
+                             @RequestParam String color,
+                             @RequestParam(defaultValue = "NORMAL") UserType userType,
+                             Authentication authentication,
+                             Model model) {
+        
+        String currentUsername = authentication.getName();
+        User currentUser = userJdbcService.findByUsername(currentUsername)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + currentUsername));
+
+        // Only admins can create users
+        if (ADMIN != currentUser.getRole()) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.access.denied"));
+            return getUserContent(model, currentUser);
+        }
+        try {
+            if (StringUtils.hasText(username) && StringUtils.hasText(displayName) && StringUtils.hasText(password)) {
+
+                User createdUser = this.userService.createNewUser(username,
+                        displayName,
+                        password,
+                        role, UnitSystem.valueOf(unitSystem),
+                        preferredLanguage,
+                        homeLatitude,
+                        homeLongitude,
+                        timezoneOverride,
+                        timeDisplayMode,
+                        timeMode,
+                        dayStartTime,
+                        color,
+                        userType);
+                // Handle avatar - prioritize custom upload over default
+                if (avatar != null && !avatar.isEmpty()) {
+                    handleAvatarUpload(avatar, createdUser.getId(), model);
+                } else if (StringUtils.hasText(defaultAvatar)) {
+                    handleDefaultAvatarSelection(defaultAvatar, createdUser.getId(), model);
+                }
+                
+                // Handle custom CSS upload
+                if (customCss != null && !customCss.isEmpty()) {
+                    String cssContent = handleCssUpload(customCss, model);
+                    if (cssContent != null) {
+                        // Update user settings with CSS content
+                        UserSettings existingSettings = userSettingsJdbcService.findByUserId(createdUser.getId())
+                                .orElse(UserSettings.defaultSettings(createdUser.getId()));
+                        UserSettings updatedSettings = new UserSettings(
+                                existingSettings.getUserId(),
+                                existingSettings.getSelectedLanguage(),
+                                existingSettings.getUnitSystem(),
+                                existingSettings.getHomeLatitude(),
+                                existingSettings.getHomeLongitude(),
+                                existingSettings.getTimeZoneOverride(),
+                                existingSettings.getTimeDisplayMode(),
+                                existingSettings.getTimeMode(),
+                                existingSettings.getDayStartTime(),
+                                cssContent,
+                                existingSettings.getLatestData(),
+                                color,
+                                existingSettings.getVersion()
+                        );
+                        userSettingsJdbcService.save(updatedSettings);
+                    }
+                }
+                
+                model.addAttribute("successMessage", i18nService.translate("message.success.user.created"));
+            } else {
+                model.addAttribute("errorMessage", i18nService.translate("message.error.user.creation", "All fields must be filled"));
+            }
+        } catch (Exception e) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.user.creation", e.getMessage()));
+        }
+
+        List<User> users = userJdbcService.getAllUsers();
+        model.addAttribute("users", users);
+        model.addAttribute("currentUsername", authentication.getName());
+        model.addAttribute("isAdmin", true);
+        model.addAttribute("addUserAvailable", !localLoginDisabled);
+
+        // Return the users-list fragment
+        return "fragments/user-management :: users-list";
+    }
+
+    @PostMapping("/users/update")
+    public String updateUser(@RequestParam Long userId,
+                             @RequestParam(required = false)  String username,
+                             @RequestParam(required = false)  String displayName,
+                             @RequestParam(required = false) String password,
+                              @RequestParam(defaultValue = "USER") Role role,
+                              @RequestParam(defaultValue = "NORMAL") UserType userType,
+                              @RequestParam(required = false) String _confirmLiveDataOnly,
+                              @RequestParam Language preferred_language,
+                             @RequestParam(defaultValue = "METRIC") String unit_system,
+                             @RequestParam(required = false) Double homeLatitude,
+                             @RequestParam(required = false) Double homeLongitude,
+                             @RequestParam(required = false) MultipartFile avatar,
+                             @RequestParam(name = "timezone_override", required = false) String timezoneOverride,
+                             @RequestParam(name = "time_display_mode", defaultValue = "DEFAULT") TimeDisplayMode timeDisplayMode,
+                             @RequestParam(name = "time_mode", defaultValue = "TWENTY_FOUR_HOUR") TimeMode timeMode,
+                             @RequestParam(name = "day_start_time", defaultValue = "00:00") String dayStartTime,
+                             @RequestParam(required = false) String defaultAvatar,
+                             @RequestParam(required = false) String removeAvatar,
+                             @RequestParam(required = false) MultipartFile customCss,
+                             @RequestParam(required = false) String removeCss,
+                             @RequestParam String color,
+                             Authentication authentication,
+                             HttpServletRequest request,
+                             HttpServletResponse response,
+                             Model model) {
+        String currentUsername = authentication.getName();
+        User authenticatedUser = userJdbcService.findByUsername(currentUsername)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + currentUsername));
+        User userToUpdate = userJdbcService.findById(userId)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + userId));
+        boolean isCurrentUser = userToUpdate.getUsername().equals(currentUsername);
+
+        // Only admins can edit other users, users can only edit themselves
+        if (!isCurrentUser && ADMIN != authenticatedUser.getRole()) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.access.denied"));
+            return getUserContent(model, authenticatedUser);
+        }
+
+        try {
+            User existingUser = userJdbcService.findById(userId).orElseThrow();
+
+            boolean isAdminEdit = ADMIN == authenticatedUser.getRole();
+            boolean confirmedSwitchToLiveDataOnly = isAdminEdit && StringUtils.hasText(_confirmLiveDataOnly) && userType == UserType.LIVE_DATA_ONLY;
+            boolean switchingToNormal = isAdminEdit && existingUser.getUserType() == UserType.LIVE_DATA_ONLY && userType == UserType.NORMAL;
+            UserType effectiveUserType;
+
+            if (!isAdminEdit) {
+                effectiveUserType = existingUser.getUserType();
+            } else if (confirmedSwitchToLiveDataOnly) {
+                if (!_confirmLiveDataOnly.trim().equals(existingUser.getUsername())) {
+                    model.addAttribute("errorMessage", i18nService.translate("users.live-data-only.confirm.error"));
+                    return getUserContent(model, authenticatedUser);
+                }
+                effectiveUserType = UserType.LIVE_DATA_ONLY;
+            } else if (existingUser.getUserType() == UserType.NORMAL && userType == UserType.LIVE_DATA_ONLY) {
+                effectiveUserType = existingUser.getUserType();
+            } else {
+                effectiveUserType = userType;
+            }
+            
+            String encodedPassword = existingUser.getPassword();
+            // Only update password if provided
+            if (password != null && !password.trim().isEmpty()) {
+                encodedPassword = passwordEncoder.encode(password);
+            }
+
+            if (username == null || username.trim().isEmpty()) {
+                username = existingUser.getUsername();
+            }
+            if (displayName == null || displayName.trim().isEmpty()) {
+                displayName = existingUser.getDisplayName();
+            }
+
+            User updatedUser = new User(existingUser.getId(), username, encodedPassword, displayName, existingUser.getProfileUrl(), existingUser.getExternalId(), role, effectiveUserType, existingUser.getVersion());
+            userJdbcService.updateUser(updatedUser);
+            
+            UserSettings existingSettings = userSettingsJdbcService.findByUserId(userId)
+                .orElse(UserSettings.defaultSettings(userId));
+            
+            // Handle custom CSS operations
+            String cssContent = existingSettings.getCustomCss();
+            if ("true".equals(removeCss)) {
+                cssContent = null;
+            } else if (customCss != null && !customCss.isEmpty()) {
+                String uploadedCss = handleCssUpload(customCss, model);
+                if (uploadedCss != null) {
+                    cssContent = uploadedCss;
+                }
+            }
+            
+            UnitSystem unitSystem = UnitSystem.valueOf(unit_system);
+            UserSettings updatedSettings = new UserSettings(userId,
+                                                            preferred_language,
+                                                            unitSystem,
+                                                            homeLatitude,
+                                                            homeLongitude,
+                                                            StringUtils.hasText(timezoneOverride) ? ZoneId.of(timezoneOverride) : null,
+                                                            timeDisplayMode,
+                                                            timeMode,
+                                                            LocalTime.parse(StringUtils.hasText(dayStartTime) ? dayStartTime : "00:00"),
+                                                            cssContent,
+                                                            existingSettings.getLatestData(),
+                                                            color,
+                                                            existingSettings.getVersion());
+            userSettingsJdbcService.save(updatedSettings);
+            
+            // Handle avatar operations
+            if ("true".equals(removeAvatar)) {
+                avatarService.deleteAvatar(userId);
+            } else if (avatar != null && !avatar.isEmpty()) {
+                handleAvatarUpload(avatar, userId, model);
+            } else if (StringUtils.hasText(defaultAvatar)) {
+                handleDefaultAvatarSelection(defaultAvatar, userId, model);
+            }
+            
+            // If the current user was updated, update the locale
+            if (isCurrentUser) {
+                localeResolver.setLocale(request, response, preferred_language.getLocale());
+            }
+
+            if (confirmedSwitchToLiveDataOnly) {
+                userService.switchToLiveDataOnly(existingUser);
+            }
+
+            if (switchingToNormal) {
+                userService.switchToNormal(userToUpdate);
+            }
+
+            model.addAttribute("successMessage", i18nService.translate("message.success.user.updated"));
+
+            // If the current user was updated, update the authentication
+            if (isCurrentUser && !currentUsername.equals(username)) {
+                // We need to re-authenticate with the new username
+                model.addAttribute("requireRelogin", true);
+                model.addAttribute("newUsername", username);
+            }
+        } catch (Exception e) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.user.update", e.getMessage()));
+        }
+
+        // If admin, return to user list; if regular user, stay on their form
+        if (ADMIN == authenticatedUser.getRole()) {
+            List<User> users = userJdbcService.getAllUsers();
+            model.addAttribute("users", users);
+            model.addAttribute("currentUsername", isCurrentUser ? username : currentUsername);
+            model.addAttribute("isAdmin", true);
+            model.addAttribute("addUserAvailable", !localLoginDisabled);
+            return "fragments/user-management :: users-list";
+        } else {
+            // For regular users, return their updated form
+            return getUserContent(model, userToUpdate);
+        }
+    }
+
+    @GetMapping("/user-form")
+    public String getUserForm(@RequestParam(required = false) Long userId,
+                              @RequestParam(required = false) String username,
+                              @RequestParam(required = false) String displayName,
+                              @RequestParam(required = false) String role,
+                              Authentication authentication,
+                              Model model) {
+        
+        String currentUsername = authentication.getName();
+        User currentUser = userJdbcService.findByUsername(currentUsername)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + currentUsername));
+
+        // Only admins can access user forms for other users or create new users
+        if (userId != null && !userId.equals(currentUser.getId()) && ADMIN != currentUser.getRole()) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.access.denied"));
+            return getUserContent(model, currentUser);
+        }
+        
+        if (userId == null && ADMIN != currentUser.getRole()) {
+            model.addAttribute("errorMessage", i18nService.translate("message.error.access.denied"));
+            return getUserContent(model, currentUser);
+        }
+        if (userId != null) {
+            model.addAttribute("userId", userId);
+            User user = userJdbcService.findById(userId).orElse(null);
+            model.addAttribute("username", username);
+            model.addAttribute("displayName", displayName);
+            model.addAttribute("selectedRole", role);
+            model.addAttribute("selectedUserType", user != null ? user.getUserType() : UserType.NORMAL);
+            model.addAttribute("externallyManaged", user != null && user.getExternalId() != null && oidcEnabled);
+            model.addAttribute("externalProfile", user != null ? user.getProfileUrl() : null);
+            model.addAttribute("localLoginDisabled", localLoginDisabled);
+            UserSettings userSettings = userSettingsJdbcService.findByUserId(userId).orElse(UserSettings.defaultSettings(userId));
+            model.addAttribute("selectedLanguage", userSettings.getSelectedLanguage());
+            model.addAttribute("selectedUnitSystem", userSettings.getUnitSystem().name());
+            model.addAttribute("homeLatitude", userSettings.getHomeLatitude());
+            model.addAttribute("homeLongitude", userSettings.getHomeLongitude());
+            model.addAttribute("timeZoneOverride", userSettings.getTimeZoneOverride());
+            model.addAttribute("timeDisplayMode", userSettings.getTimeDisplayMode().name());
+            model.addAttribute("timeMode", userSettings.getTimeMode().name());
+            model.addAttribute("dayStartTime", userSettings.getDayStartTime());
+            model.addAttribute("selectedColor", userSettings.getColor());
+        } else {
+            // Default values for new users
+            model.addAttribute("selectedLanguage", Language.EN);
+            model.addAttribute("selectedUnitSystem", "METRIC");
+            model.addAttribute("selectedRole", "USER");
+            model.addAttribute("selectedUserType", UserType.NORMAL);
+            model.addAttribute("homeLatitude", null);
+            model.addAttribute("homeLongitude", null);
+            model.addAttribute("externallyManaged", false);
+            model.addAttribute("externalProfile", null);
+            model.addAttribute("timeDisplayMode", TimeDisplayMode.DEFAULT.name());
+            model.addAttribute("timeMode", TimeMode.TWENTY_FOUR_HOUR.name());
+            model.addAttribute("dayStartTime", LocalTime.MIDNIGHT);
+            model.addAttribute("localLoginDisabled", localLoginDisabled);
+        }
+
+        model.addAttribute("unitSystems", UnitSystem.values());
+        model.addAttribute("availableLanguages", Language.values());
+        model.addAttribute("availableTimezones", ZoneId.getAvailableZoneIds().stream().sorted());
+        model.addAttribute("availableTimeDisplayModes", TimeDisplayMode.values());
+        model.addAttribute("availableTimeModes", TimeMode.values());
+        model.addAttribute("defaultColors", defaultColors);
+
+        // Check if user has avatar and custom CSS
+        if (userId != null) {
+            boolean hasAvatar = this.avatarService.getInfo(userId).isPresent();
+            model.addAttribute("hasAvatar", hasAvatar);
+            
+            UserSettings userSettings = userSettingsJdbcService.findByUserId(userId).orElse(null);
+            boolean hasCustomCss = userSettings != null && StringUtils.hasText(userSettings.getCustomCss());
+            model.addAttribute("hasCustomCss", hasCustomCss);
+        }
+
+        model.addAttribute("defaultAvatars", DEFAULT_AVATARS);
+
+        model.addAttribute("isAdmin", ADMIN == currentUser.getRole());
+        
+        return "fragments/user-management :: user-form-page";
+    }
+
+    private void handleAvatarUpload(MultipartFile avatar, Long userId, Model model) {
+        if (avatar != null && !avatar.isEmpty()) {
+            try {
+                // Validate file size
+                if (avatar.getSize() > MAX_AVATAR_SIZE) {
+                    model.addAttribute("avatarError", i18nService.translate("users.avatar.error.to-large"));
+                    return;
+                }
+                
+                // Validate content type
+                String contentType = avatar.getContentType();
+                if (contentType == null || !isAllowedContentType(contentType)) {
+                    model.addAttribute("avatarError", i18nService.translate("users.avatar.error.invalid-file-type"));
+                    return;
+                }
+                
+                byte[] imageData = avatar.getBytes();
+                this.avatarService.updateAvatar(userId, contentType, imageData);
+
+            } catch (IOException e) {
+                model.addAttribute("avatarError", i18nService.translate("users.avatar.error.generic", e.getMessage()));
+            }
+        }
+    }
+
+    
+    private boolean isAllowedContentType(String contentType) {
+        for (String allowed : ALLOWED_CONTENT_TYPES) {
+            if (allowed.equals(contentType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    private void handleDefaultAvatarSelection(String defaultAvatar, Long userId, Model model) {
+        try {
+            // Validate the default avatar selection
+            if (!DEFAULT_AVATARS.contains(defaultAvatar)) {
+                model.addAttribute("avatarError", "Invalid default avatar selection.");
+                return;
+            }
+            
+            // Load the default avatar from resources
+            ClassPathResource resource = new ClassPathResource("static/img/avatars/default/" + defaultAvatar);
+            if (!resource.exists()) {
+                model.addAttribute("avatarError", "Default avatar file not found.");
+                return;
+            }
+            
+            byte[] imageData = resource.getInputStream().readAllBytes();
+            String mimeType = "image/jpeg"; // All your defaults are .jpg
+
+            this.avatarService.updateAvatar(userId, mimeType, imageData);
+
+        } catch (IOException e) {
+            model.addAttribute("avatarError", "Error processing default avatar: " + e.getMessage());
+        }
+    }
+    
+    private String handleCssUpload(MultipartFile cssFile, Model model) {
+        if (cssFile != null && !cssFile.isEmpty()) {
+            try {
+                // Validate file size
+                if (cssFile.getSize() > MAX_CSS_SIZE) {
+                    model.addAttribute("cssError", i18nService.translate("users.custom.css.error.to-large"));
+                    return null;
+                }
+                
+                // Validate content type
+                String contentType = cssFile.getContentType();
+                if (!ALLOWED_CSS_CONTENT_TYPE.equals(contentType)) {
+                    model.addAttribute("cssError", i18nService.translate("users.custom.css.error.invalid-file-type"));
+                    return null;
+                }
+                
+                // Validate file extension
+                String originalFilename = cssFile.getOriginalFilename();
+                if (originalFilename == null || !originalFilename.toLowerCase().endsWith(".css")) {
+                    model.addAttribute("cssError", i18nService.translate("users.custom.css.error.invalid-file-type"));
+                    return null;
+                }
+                
+                // Return CSS content as string
+                return new String(cssFile.getBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                
+            } catch (IOException e) {
+                model.addAttribute("cssError", i18nService.translate("users.custom.css.error.generic", e.getMessage()));
+                return null;
+            }
+        }
+        return null;
+    }
+}

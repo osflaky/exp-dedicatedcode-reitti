@@ -1,0 +1,1189 @@
+class GpsDataManager {
+    constructor(userConfig, userSettings, timeZone) {
+        this.config = userConfig;
+        this.userSettings = userSettings;
+        this.color = this._hexToRgb(userConfig.color || '#3388ff');
+        this.id = userConfig.id || 'default';
+        this.timeZone = timeZone || "UTC";
+
+        // 1. Buffers
+        //Memory Layout for buffer and cleaned buffer is [Lng, Lat, Alt, LinTs, Day, AggTs]
+        this.buffer = new Float32Array(16000 * 6);
+        this.cleanedBuffer = new Float32Array(16000 * 6);
+        this.smoothedBuffer = new Float32Array(16000 * 6);
+        this.snappedBuffer = null;
+        this.snappedVersion = 0;
+        this.h3Cells = [];
+
+        // 2. State
+        this.cursor = 0;
+        this.cleanedCursor = 0;
+        this.smoothedCursor = 0;
+        this.smoothingVersion = 0;
+        this.minTimestamp = null;
+        this.maxTimestamp = null;
+        this.totalExpected = 0;
+        this.bounds = null;
+        this._dataCache = {};
+        this.lastLocation = null;
+        this.activityWeights = [0];
+        this.totalActivity = 0;
+        this.trips = [];
+        this.tripsMinTimestamp = null;
+        this.transitions = [];
+        this.modeSegments = [];
+    }
+
+    async loadFixed(onProgress) {
+        return this.load(0, Number.MAX_SAFE_INTEGER, onProgress)
+    }
+
+    async loadFixedWithVisits(visits, onProgress) {
+        this.visits = visits.map(p => ({
+                id: p.id,
+                coordinates: [p.longitudeCentroid, p.latitudeCentroid],
+                totalDurationSec: 6000,
+                name: p.name,
+                activeRanges: []
+        }));
+        return this.load(0, Number.MAX_SAFE_INTEGER, onProgress)
+    }
+
+    destroy() {
+        this.abortController?.abort();
+        this.abortController = null;
+        this.buffer = null;
+        this.cleanedBuffer = null;
+        this.smoothedBuffer = null;
+        this.snappedBuffer = null;
+        this.visits = null;
+        this.lastLocation = null;
+    }
+
+    async load(startUTC, endUTC, onProgress) {
+        if (this.loadingState === 'complete' &&
+            startUTC >= this.minTimestamp &&
+            endUTC <= this.maxTimestamp) {
+
+            console.log("Range already in memory. Skipping fetch.");
+            if (onProgress) onProgress(this.cursor, this.totalExpected, 'complete');
+            return;
+        }
+
+        // If a controller exists, it means a previous load is still running.
+        if (this.abortController) {
+            this.abortController.abort();
+        }
+
+        this.abortController = new AbortController();
+        const { signal } = this.abortController;
+
+        try {
+            this._dataCache = {};
+            this._cachedSegmentPaths = null;
+            this._cachedSegmentPathsCursor = 0;
+            this._cachedSegmentPathsSmoothed = null;
+            this._cachedSegmentPathsSmoothedCursor = 0;
+            this.cursor = 0;
+            this.cleanedCursor = 0;
+            this.buffer = new Float32Array(16000 * 6);
+            this.cleanedBuffer = new Float32Array(16000 * 6);
+            this.smoothedBuffer = new Float32Array(16000 * 6);
+            this.snappedBuffer = null;
+            this.bounds = null;
+
+            this.loadingState = 'metadata';
+
+            if (onProgress) onProgress(0, 0, this.loadingState);
+            const requests = [];
+            requests.push(fetch(window.contextPath + this.config.map.metaDataUrl, {signal}))
+            if (this.config.map.visitsUrl) {
+                requests.push(fetch(window.contextPath + this.config.map.visitsUrl, {signal}))
+            }
+            const h3Promise = this.config.map.h3CellUrl
+                ? fetch(window.contextPath + this.config.map.h3CellUrl, {signal}).then(r => r.json())
+                : Promise.resolve(null);
+
+            const tripsPromise = this.config.map.tripsUrl
+                ? fetch(window.contextPath + this.config.map.tripsUrl, {signal}).then(r => r.json()).catch(() => null)
+                : Promise.resolve(null);
+
+            if (this.config.mapDataProviders) {
+                this.config.mapDataProviders.forEach(provider => {
+                    requests.push(provider.load({signal}))
+                });
+            }
+            const responses = await Promise.all(requests);
+            const h3Data = await h3Promise;
+            if (h3Data) {
+                const h3Map = new Map();
+                h3Data.forEach(entry => {
+                    const h3Hex = BigInt(entry.hexagon).toString(16);
+                    if (!h3Map.has(h3Hex)) {
+                        h3Map.set(h3Hex, []);
+                    }
+                    h3Map.get(h3Hex).push({ time: entry.time, count: entry.count });
+                });
+                h3Map.forEach(buckets => buckets.sort((a, b) => a.time - b.time));
+                this.h3Cells = h3Map;
+            }
+
+            const meta = await responses[0].json();
+            this.lastLocation = meta.latestLocation;
+            if (this.config.map.visitsUrl) {
+                const receivedVisits = await responses[1].json();
+                this.visits = receivedVisits.places.map(p => ({
+                    id: p.place.id,
+                    coordinates: [p.lng, p.lat],
+                    polygon: p.place.polygon,
+                    totalDurationSec: p.totalDurationMs / 1000,
+                    name: p.place.name,
+                    activeRanges: p.visits.map(v => {
+                        const startUtcSeconds = Math.floor(new Date(v.startTime).getTime() / 1000);
+                        const startOffset = this._getOffsetSeconds(startUtcSeconds);
+                        const endUtcSeconds = Math.floor(new Date(v.endTime).getTime() / 1000);
+                        const endOffset = this._getOffsetSeconds(endUtcSeconds);
+                        const localStartTs = startUtcSeconds + startOffset;
+                        const localEndTs = endUtcSeconds + endOffset;
+
+                        return ({
+                            start: startUtcSeconds,
+                            end: endUtcSeconds,
+                            startAggregate: startUtcSeconds < startUTC ? 0 :  ((localStartTs % 86400) + 86400) % 86400,
+                            endAggregate:  endUtcSeconds > endUTC ? 86400 : ((localEndTs % 86400) + 86400) % 86400,
+                            startDayOfWeek: Math.pow(new Date(localStartTs * 1000).getUTCDay(), 2),
+                            endDayOfWeek: Math.pow(new Date(localEndTs * 1000).getUTCDay(), 2)
+                        });
+                    }),
+                    originalVisits: p.visits
+                }));
+            }
+
+            const tripsData = await tripsPromise;
+            if (tripsData && Array.isArray(tripsData.trips)) {
+                this.trips = tripsData.trips;
+                this.tripsMinTimestamp = tripsData.minTimestamp;
+            } else {
+                this.trips = [];
+                this.tripsMinTimestamp = null;
+            }
+
+            // Update internal range trackers
+            this.minTimestamp = startUTC;
+            this.maxTimestamp = endUTC;
+            this.totalExpected = meta.totalPoints;
+            if (this.totalExpected > 0) {
+                this.bounds = [meta.minLng, meta.minLat, meta.maxLng, meta.maxLat];
+            }
+            // Clear old data to make room for the new range
+            this.cursor = 0;
+            this.cleanedCursor = 0;
+            this.smoothedCursor = 0;
+            this.snappedBuffer = null;
+
+            this.loadingState = 'streaming';
+            await this._streamPoints(onProgress, signal);
+
+            // Security check: If aborted during stream, stop here
+            if (signal.aborted) {
+                throw new DOMException('Aborted', 'AbortError');
+            }
+
+            this.loadingState = 'bundling';
+            await this._generateBundledPath(onProgress);
+            await this._generateSmoothedPath();
+            this._computeActivityWeights();
+            this._computeTransitions();
+            this.loadingState = 'complete';
+            if (onProgress) onProgress(this.totalExpected, this.totalExpected, 'complete');
+            if (this.config.map.visitsUrl) {
+                console.log("Load complete:", this.loadingState, 'with bounds:', this.bounds, 'and total points:', this.totalExpected, ' (cleaned:', this.cleanedCursor, ') in range:', startUTC, 'to', endUTC, 'at', this.visits.length, 'visits.');
+            } else {
+                console.log("Load complete:", this.loadingState, 'with bounds:', this.bounds, 'and total points:', this.totalExpected, ' (cleaned:', this.cleanedCursor, ') in range:', startUTC, 'to', endUTC);
+            }
+
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                console.warn("Previous load cancelled by new selection.");
+                if (onProgress) onProgress(0, 0, 'aborted');
+
+                return;
+            }
+            console.error("Load failed:", error);
+            this.loadingState = 'error';
+        }
+    }
+
+    /**
+     * Returns optimized binary attributes for deck.gl layers.
+     * @param {string} mode - 'raw', 'cleaned', 'smoothed', or 'bundled'
+     * @param {boolean} isAggregate - Whether to use 24h clock or linear time
+     * @param {Object} rangeIndices - Optional {start, count} from binary search
+     */
+    getLayerData(mode, isAggregate = false, rangeIndices = null) {
+        const rangeKey = rangeIndices ? `${rangeIndices.start}-${rangeIndices.count}` : 'full';
+        const cacheKey = `${mode}-${isAggregate}-${rangeKey}`;
+        const currentPointCount = mode === 'raw' ? this.cursor
+            : mode === 'smoothed' ? this.smoothedCursor + this.smoothingVersion * 1e9
+            : this.cleanedCursor;
+
+        if (this._dataCache[cacheKey] && this._dataCache[cacheKey].version === currentPointCount) {
+            return this._dataCache[cacheKey].payload;
+        }
+
+        let payload;
+        const thresholdSec = 300; // 5 minutes.
+
+        if (mode === 'bundled') {
+            const stride = 20;
+            const strideFloats = 5; // 20 bytes / 4 bytes per float
+            const timeIndex = isAggregate ? 4 : 2; // Byte offset 16/4 or 8/4
+            const usedLength = this.cleanedCursor * strideFloats;
+            const trimmed = this.snappedBuffer.subarray(0, usedLength);
+
+            const { length, startIndices } = this._getBinaryIndices(
+                trimmed, this.cleanedCursor, strideFloats, timeIndex, thresholdSec
+            );
+
+            payload = {
+                length: length,
+                startIndices: startIndices,
+                attributes: {
+                    getPath: { value: trimmed, size: 2, stride: stride, offset: 0 },
+                    getTimestamps: { value: trimmed, size: 1, stride: stride, offset: isAggregate ? 16 : 8 }
+                }
+            };
+        } else if (mode === 'cleaned') {
+            const stride = 24;
+            const strideFloats = 6;
+            const timeIndex = isAggregate ? 5 : 3;
+            const usedLength = this.cleanedCursor * strideFloats;
+            const trimmed = this.cleanedBuffer.subarray(0, usedLength);
+
+            const { length, startIndices } = this._getBinaryIndices(
+                trimmed, this.cleanedCursor, strideFloats, timeIndex, thresholdSec
+            );
+
+            payload = {
+                length: length,
+                startIndices: startIndices,
+                attributes: {
+                    getPath: { value: trimmed, size: 3, stride: stride, offset: 0 },
+                    getTimestamps: { value: trimmed, size: 1, stride: stride, offset: isAggregate ? 20 : 12 }
+                }
+            };
+        } else if (mode === 'smoothed') {
+            const stride = 24;
+            const strideFloats = 6;
+            const timeIndex = isAggregate ? 5 : 3;
+            const usedLength = this.smoothedCursor * strideFloats;
+            const trimmed = this.smoothedBuffer.subarray(0, usedLength);
+
+            const { length, startIndices } = this._getBinaryIndices(
+                trimmed, this.smoothedCursor, strideFloats, timeIndex, thresholdSec
+            );
+
+            payload = {
+                length: length,
+                startIndices: startIndices,
+                attributes: {
+                    getPath: { value: trimmed, size: 3, stride: stride, offset: 0 },
+                    getTimestamps: { value: trimmed, size: 1, stride: stride, offset: isAggregate ? 20 : 12 }
+                }
+            };
+        } else if (mode === 'raw') {
+            const stride = 24;
+            const strideFloats = 6;
+            const timeIndex = isAggregate ? 5 : 3;
+            const usedLength = this.cursor * strideFloats;
+            const trimmed = this.buffer.subarray(0, usedLength);
+            const { length, startIndices } = this._getBinaryIndices(
+                trimmed, this.cursor, strideFloats, timeIndex, thresholdSec
+            );
+            payload = {
+                length: length,
+                startIndices: startIndices,
+                attributes: {
+                    getPath: { value: trimmed, size: 3, stride: stride, offset: 0 },
+                    getTimestamps: { value: trimmed, size: 1, stride: stride, offset: isAggregate ? 20 : 12 }
+                }
+            };
+        }
+
+        this._dataCache[cacheKey] = {
+            version: currentPointCount,
+            payload: payload
+        };
+
+        return payload;
+    }
+
+    _getBinaryIndices(buffer, pointCount, strideFloats, timeIndex, thresholdSec) {
+        // If continuous is true, or no points, return single path
+        if (this.config.continuous || pointCount === 0) {
+            return {
+                length: 1,
+                startIndices: new Uint32Array([0, pointCount])
+            };
+        }
+
+        const indices = [0];
+
+        // Scan buffer for time gaps
+        for (let i = 0; i < pointCount - 1; i++) {
+            const t1 = buffer[i * strideFloats + timeIndex];
+            const t2 = buffer[(i + 1) * strideFloats + timeIndex];
+
+            // If the gap exceeds the threshold, break the line at i+1
+            if (Math.abs(t2 - t1) > thresholdSec) {
+                indices.push(i + 1);
+            }
+        }
+
+        // Always push the final vertex count as required by deck.gl
+        indices.push(pointCount);
+
+        return {
+            length: indices.length - 1,
+            startIndices: new Uint32Array(indices)
+        };
+    }
+
+    async _streamPoints(onProgress, signal) {
+        if (this.config.map.streamUrl === undefined) {
+            const midTimestamp = this.minTimestamp != null && this.maxTimestamp != null
+                ? Math.floor((this.minTimestamp + this.maxTimestamp) / 2)
+                : Math.floor(Date.now() / 1000);
+            const centerLng = this.lastLocation.longitude;
+            const centerLat = this.lastLocation.latitude;
+            this._addPoint(centerLng, centerLat, 0, midTimestamp, 0);
+
+            this.totalExpected = this.cursor;
+            return;
+        }
+        const response = await fetch(window.contextPath + this.config.map.streamUrl);
+        const reader = response.body.getReader();
+        let leftover = null;
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) {
+                break;
+            }
+            if (signal.aborted) {
+                await reader.cancel();
+                break;
+            }
+            let combinedValue = value;
+            if (leftover) {
+                combinedValue = new Uint8Array(leftover.length + value.length);
+                combinedValue.set(leftover);
+                combinedValue.set(value, leftover.length);
+                leftover = null;
+            }
+
+            const pointsCount = Math.floor(combinedValue.length / 20);
+            if (pointsCount * 16 < combinedValue.length) {
+                leftover = combinedValue.slice(pointsCount * 20);
+            }
+
+            const floatArray = new Float32Array(combinedValue.buffer, combinedValue.byteOffset, pointsCount * 5);
+
+            for (let i = 0; i < floatArray.length; i += 5) {
+                this._addPoint(floatArray[i + 1], floatArray[i], floatArray[i + 2], floatArray[i + 3], floatArray[i + 4]);
+            }
+
+            if (onProgress) {
+                onProgress(this.cursor, this.totalExpected, this.loadingState);
+            }
+        }
+    }
+
+    _addPoint(lng, lat, alt, tsUtc, offsetSeconds) {
+        this._ensureCapacity(this.cursor + 1);
+        const timestamp = tsUtc;
+        const tsLinear = timestamp;
+        const localTs = timestamp + offsetSeconds;
+        const tsAggregate = ((localTs % 86400) + 86400) % 86400;
+        let dayIndex = new Date(localTs * 1000).getUTCDay(); // Standard: Sun=0, Mon=1...
+        if (this.userSettings.weekStartsOnMonday) {
+            // Shift Sunday(0) to 6, Monday(1) to 0, etc.
+            dayIndex = (dayIndex + 6) % 7;
+        }
+        // Store as bitmask: 2^0, 2^1, 2^2...
+        // Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64
+        const dayOfWeek = 1 << dayIndex;
+        // Write to Raw Buffer
+        this._writeToBuffer(this.buffer, this.cursor++, lng, lat, 0, tsLinear, tsAggregate, dayOfWeek);
+
+        // Write to Cleaned Buffer (Spatial Redundancy Check)
+        if (!this._isRedundant(lng, lat, tsUtc)) {
+            this._writeToBuffer(this.cleanedBuffer, this.cleanedCursor++, lng, lat, 0, tsLinear, tsAggregate, dayOfWeek);
+        }
+    }
+
+    _writeToBuffer(target, idx, lng, lat, alt, timeLinear, timeAggregate, dayOfWeek) {
+        const i = idx * 6;
+        target[i] = lng;
+        target[i + 1] = lat;
+        target[i + 2] = alt;
+        target[i + 3] = timeLinear;
+        target[i + 4] = dayOfWeek;
+        target[i + 5] = timeAggregate;
+    }
+
+    _isRedundant(lng, lat, ts) {
+        if (this.cleanedCursor === 0) return false;
+
+        const lastIdx = (this.cleanedCursor - 1) * 6;
+        const dx = this.cleanedBuffer[lastIdx] - lng;
+        const dy = this.cleanedBuffer[lastIdx + 1] - lat;
+        const dt = Math.abs(ts - this.cleanedBuffer[lastIdx + 3]);
+
+        // 3. Return true only if both time and space are close
+        return (dt < 30) && (dx * dx + dy * dy < 8e-10);
+    }
+
+    _ensureCapacity() {
+        if ((this.cursor + 1) * 6 >= this.buffer.length) {
+            const newSize = this.buffer.length * 2;
+            const nb = new Float32Array(newSize);
+            const ncb = new Float32Array(newSize);
+            const nsb = new Float32Array(newSize);
+            nb.set(this.buffer);
+            ncb.set(this.cleanedBuffer);
+            if (this.smoothedBuffer) nsb.set(this.smoothedBuffer.subarray(0, this.smoothedCursor * 6));
+            this.buffer = nb;
+            this.cleanedBuffer = ncb;
+            this.smoothedBuffer = nsb;
+        }
+    }
+
+    _getOffsetSeconds(tsUtc) {
+        const date = new Date(tsUtc * 1000);
+
+        // Create a formatter that outputs the timezone offset name (e.g., "GMT+2" or "UTC")
+        // 'shortOffset' gives us a format we can parse: GMT+X or GMT-X
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: this.timeZone,
+            timeZoneName: 'shortOffset',
+        });
+
+        const parts = formatter.formatToParts(date);
+        const offsetString = parts.find(part => part.type === 'timeZoneName').value;
+
+        // The offsetString will be "GMT", "GMT+1", "GMT-05:30", etc.
+        return this._parseOffsetToSeconds(offsetString);
+    }
+
+    _parseOffsetToSeconds(offsetString) {
+        if (offsetString === 'GMT' || offsetString === 'UTC') return 0;
+
+        // Remove "GMT" and split by ":"
+        // Matches patterns like +02, -05, +05:30
+        const match = offsetString.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+        if (!match) return 0;
+
+        const [_, sign, hours, minutes] = match;
+        const totalSeconds = (parseInt(hours) * 3600) + (parseInt(minutes || 0) * 60);
+
+        return sign === '+' ? totalSeconds : -totalSeconds;
+    }
+
+    async _generateBundledPath(onProgress, precisionValue = 0.0005, weight = 0.5) {
+        this._dataCache = {};
+        const precision = 1 / precisionValue;
+        const TABLE_SIZE = 4194304;
+        const TABLE_MASK = TABLE_SIZE - 1;
+        const grid = new Float64Array(TABLE_SIZE * 3);
+
+        this.snappedBuffer = new Float32Array(this.cleanedCursor * 5);
+
+        // Pass 1: Global Grid Accumulation (Unchanged)
+        for (let i = 0; i < this.cleanedCursor; i++) {
+            const idx = i * 6;
+            const x = this.cleanedBuffer[idx], y = this.cleanedBuffer[idx + 1];
+            const h = ((Math.floor(x * precision) * 73856093) ^ (Math.floor(y * precision) * 19349663)) & TABLE_MASK;
+            grid[h * 3] += x;
+            grid[h * 3 + 1] += y;
+            grid[h * 3 + 2]++;
+
+            if (i % 500000 === 0) { // Increased interval for better performance
+                if (onProgress) onProgress(i, this.cleanedCursor, 'bundling');
+                await new Promise(r => setTimeout(r, 0));
+            }
+        }
+
+        // Pass 2: Centroid Snap + Timestamp Injection
+        for (let i = 0; i < this.cleanedCursor; i++) {
+            const idx = i * 6; // Source (6-float stride)
+            const s = i * 5;   // Destination (4-float stride)
+
+            const x = this.cleanedBuffer[idx];
+            const y = this.cleanedBuffer[idx + 1];
+            const h = ((Math.floor(x * precision) * 73856093) ^ (Math.floor(y * precision) * 19349663)) & TABLE_MASK;
+            const c = grid[h * 3 + 2];
+
+            // Bundled Geometry
+            this.snappedBuffer[s] = x * (1 - weight) + (grid[h * 3] / c) * weight;
+            this.snappedBuffer[s + 1] = y * (1 - weight) + (grid[h * 3 + 1] / c) * weight;
+
+            // Inject Timestamps (Direct copy from source buffer)
+            this.snappedBuffer[s + 2] = this.cleanedBuffer[idx + 3]; // linearTs
+            this.snappedBuffer[s + 3] = this.cleanedBuffer[idx + 4]; // aggTs
+            this.snappedBuffer[s + 4] = this.cleanedBuffer[idx + 5]; // dayOfWeek (NEW)
+        }
+
+        // Pass 3: Laplacian Smoothing (Adjusted for stride 4)
+        for (let i = 1; i < this.cleanedCursor - 1; i++) {
+            const c = i * 5, p = (i - 1) * 5, n = (i + 1) * 5;
+            this.snappedBuffer[c] = (this.snappedBuffer[p] + this.snappedBuffer[c] + this.snappedBuffer[n]) / 3;
+            this.snappedBuffer[c + 1] = (this.snappedBuffer[p + 1] + this.snappedBuffer[c + 1] + this.snappedBuffer[n + 1]) / 3;
+        }
+
+        this.snappedVersion++;
+        if (onProgress) onProgress(this.cleanedCursor, this.cleanedCursor, 'bundling');
+    }
+
+    /**
+     * Builds the smoothed buffer used by the SMOOTHED view mode.
+     *
+     * Pass 1 collapses stationary clusters: consecutive points that stay
+     * within `radiusMeters` of the run's first point (and with no data gap
+     * larger than 300s) are replaced by two coincident centroid points
+     * carrying the enter/exit timestamps. The centroid is computed from the
+     * middle 70% of the run so walk-in/walk-out movement at the cluster
+     * edges does not drag the collapsed position off the stay. The
+     * coincident pair keeps the path visually closed across the resulting
+     * time break while making the animated position linger at the stay
+     * instead of jittering.
+     *
+     * Pass 2 applies a constant-velocity Kalman filter per continuous
+     * segment (reset at data gaps > 300s and at collapsed stays) to
+     * smooth GPS jitter while actually moving. All timestamps are
+     * preserved, so activity weights and the 24h aggregate stay valid.
+     */
+    async _generateSmoothedPath() {
+        const cfg = this.config.smoothed || {};
+        const radiusMeters = cfg.radiusMeters || 25;
+        const minStaySeconds = cfg.minStaySeconds || 60;
+        const gapSeconds = 300; // must match _getBinaryIndices threshold
+        const gpsNoiseMeters = cfg.gpsNoiseMeters || 10;
+        const accelNoise = cfg.accelerationNoise || 4;
+        const adaptiveGate = cfg.adaptiveGate || 6.63;      // chi2 1-DOF, 99%
+        const adaptiveGain = cfg.adaptiveGain != null ? cfg.adaptiveGain : 15;
+        const adaptiveMaxBoost = cfg.adaptiveMaxBoost || 50;
+
+        this.smoothedCursor = 0;
+        this.smoothingVersion++;
+        if (this.cleanedCursor === 0) return;
+
+        const src = this.cleanedBuffer;
+        const dst = this.smoothedBuffer;
+        const radiusSq = radiusMeters * radiusMeters;
+
+        // ---- Pass 1: stationary collapse ----
+        let runStart = 0;
+        let anchorLng = src[0];
+        let anchorLat = src[1];
+        let prevTs = src[3];
+        const collapsedEnters = new Set();
+
+        const emitRun = (start, end) => {
+            const s = start * 6;
+            const e = (end - 1) * 6;
+            if (end - start >= 3 && src[e + 3] - src[s + 3] >= minStaySeconds) {
+                // Centroid from the middle 70% of the run: the cluster's
+                // leading/trailing points are usually walk-in/walk-out
+                // movement, which would otherwise drag the collapsed
+                // position off the actual stay.
+                const keep = Math.max(1, Math.floor((end - start) * 0.7));
+                const skip = Math.floor((end - start - keep) / 2);
+                let sumLng = 0, sumLat = 0;
+                for (let i = start + skip; i < start + skip + keep; i++) {
+                    sumLng += src[i * 6];
+                    sumLat += src[i * 6 + 1];
+                }
+                const lng = sumLng / keep;
+                const lat = sumLat / keep;
+                collapsedEnters.add(this.smoothedCursor);
+                this._writeSmoothedPoint(lng, lat, src[s + 3], src[s + 4], src[s + 5]);
+                this._writeSmoothedPoint(lng, lat, src[e + 3], src[e + 4], src[e + 5]);
+            } else {
+                for (let i = start; i < end; i++) {
+                    this._writeSmoothedPoint(src[i * 6], src[i * 6 + 1], src[i * 6 + 3], src[i * 6 + 4], src[i * 6 + 5]);
+                }
+            }
+        };
+
+        for (let i = 1; i < this.cleanedCursor; i++) {
+            const idx = i * 6;
+            const ts = src[idx + 3];
+            const dLng = (src[idx] - anchorLng) * Math.cos(anchorLat * Math.PI / 180) * 111320;
+            const dLat = (src[idx + 1] - anchorLat) * 110540;
+
+            if (ts - prevTs > gapSeconds || dLng * dLng + dLat * dLat > radiusSq) {
+                emitRun(runStart, i);
+                runStart = i;
+                anchorLng = src[idx];
+                anchorLat = src[idx + 1];
+            }
+            prevTs = ts;
+            if (i % 500000 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        emitRun(runStart, this.cleanedCursor);
+
+        // ---- Pass 2: constant-velocity Kalman smoothing ----
+        // Per-axis state [position(m), velocity(m/s)] with diagonal P.
+        // Work in meters relative to a per-segment equirectangular origin.
+        // Segments reset at data gaps > 300s and at collapsed stay enters,
+        // so the filtered path lands exactly on the stay centroid instead
+        // of lagging behind it.
+        //
+        // Adaptive Q (two mechanisms, both gated by the normalized innovation
+        // squared NIS = innov^2 / S of each update):
+        //  1. Strong tracking on the violation point itself: predicted P is
+        //     inflated proportionally to the violation so the filter reacts
+        //     immediately (mild for noise spikes, strong for course changes).
+        //  2. Delayed Q boost: the violation also inflates the process noise
+        //     of the NEXT step, keeping the filter tracking through the rest
+        //     of the turn. Normal jitter stays below the chi2 gate, so
+        //     nominal Q applies and straights stay glassy; after a turn the
+        //     boost decays back to 1 automatically.
+        const r = gpsNoiseMeters * gpsNoiseMeters;
+        const q = accelNoise;
+        let lng0 = 0, lat0 = 0, sx = 1, sy = 1;
+        let px = 0, vx = 0, pxx = 0, pxxv = 0, pvxv = 0;
+        let py = 0, vy = 0, pyy = 0, pyyv = 0, pvyv = 0;
+        let qxBoost = 1, qyBoost = 1;
+        let prevTsK = 0;
+        let inSegment = false;
+
+        for (let i = 0; i < this.smoothedCursor; i++) {
+            const idx = i * 6;
+            const ts = dst[idx + 3];
+
+            if (!inSegment || ts - prevTsK > gapSeconds || collapsedEnters.has(i)) {
+                lng0 = dst[idx];
+                lat0 = dst[idx + 1];
+                sx = 111320 * Math.cos(lat0 * Math.PI / 180);
+                sy = 110540;
+                px = 0; vx = 0; pxx = 1e6; pxxv = 0; pvxv = 1e4;
+                py = 0; vy = 0; pyy = 1e6; pyyv = 0; pvyv = 1e4;
+                qxBoost = 1; qyBoost = 1;
+                inSegment = true;
+                prevTsK = ts;
+                continue;
+            }
+
+            const dt = Math.max(0, ts - prevTsK);
+            prevTsK = ts;
+
+            // Predict
+            if (dt > 0) {
+                px += vx * dt;
+                py += vy * dt;
+                const dt2 = dt * dt;
+                const qx = q * qxBoost;
+                const qy = q * qyBoost;
+                pxx += 2 * dt * pxxv + dt2 * pvxv + qx * dt2 * dt2 / 4;
+                pxxv += dt * pvxv + qx * dt2 * dt / 2;
+                pvxv += qx * dt2;
+                pyy += 2 * dt * pyyv + dt2 * pvyv + qy * dt2 * dt2 / 4;
+                pyyv += dt * pvyv + qy * dt2 * dt / 2;
+                pvyv += qy * dt2;
+            }
+
+            // Update
+            const zx = (dst[idx] - lng0) * sx;
+            const zy = (dst[idx + 1] - lat0) * sy;
+
+            let innov = zx - px;
+            let sPre = pxx + r;
+            let nis = (innov * innov) / sPre;
+
+            // Strong tracking: on the violation point itself, inflate the
+            // predicted covariance proportionally to the violation so the
+            // filter reacts immediately (mild for noise spikes, strong for
+            // sustained course changes like corners).
+            if (nis > adaptiveGate) {
+                const scale = Math.min(adaptiveMaxBoost, Math.max(1, nis / adaptiveGate));
+                pxx *= scale;
+                pxxv *= scale;
+                pvxv *= scale;
+                sPre = pxx + r;
+            }
+
+            let k0 = pxx / sPre;
+            let k1 = pxxv / sPre;
+            px += k0 * innov;
+            vx += k1 * innov;
+            const oldPxxv = pxxv;
+            pxx *= (1 - k0);
+            pxxv *= (1 - k0);
+            pvxv -= k1 * oldPxxv;
+
+            qxBoost = Math.min(adaptiveMaxBoost, Math.max(1, 1 + adaptiveGain * Math.max(0, nis - adaptiveGate)));
+
+            innov = zy - py;
+            sPre = pyy + r;
+            nis = (innov * innov) / sPre;
+
+            if (nis > adaptiveGate) {
+                const scale = Math.min(adaptiveMaxBoost, Math.max(1, nis / adaptiveGate));
+                pyy *= scale;
+                pyyv *= scale;
+                pvyv *= scale;
+                sPre = pyy + r;
+            }
+
+            k0 = pyy / sPre;
+            k1 = pyyv / sPre;
+            py += k0 * innov;
+            vy += k1 * innov;
+            const oldPyyv = pyyv;
+            pyy *= (1 - k0);
+            pyyv *= (1 - k0);
+            pvyv -= k1 * oldPyyv;
+
+            qyBoost = Math.min(adaptiveMaxBoost, Math.max(1, 1 + adaptiveGain * Math.max(0, nis - adaptiveGate)));
+
+            dst[idx] = lng0 + px / sx;
+            dst[idx + 1] = lat0 + py / sy;
+
+            if (i % 500000 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        }
+    }
+
+    _writeSmoothedPoint(lng, lat, tsLinear, dayOfWeek, tsAggregate) {
+        const i = this.smoothedCursor * 6;
+        this.smoothedBuffer[i] = lng;
+        this.smoothedBuffer[i + 1] = lat;
+        this.smoothedBuffer[i + 2] = 0;
+        this.smoothedBuffer[i + 3] = tsLinear;
+        this.smoothedBuffer[i + 4] = dayOfWeek;
+        this.smoothedBuffer[i + 5] = tsAggregate;
+        this.smoothedCursor++;
+    }
+
+    _computeActivityWeights() {
+        if (!this.visits || this.visits.length === 0) {
+            this.activityWeights = new Float64Array([0]);
+            this.totalActivity = 0;
+            return;
+        }
+
+        const visitWeight = 0.05;
+        const tripWeight = 1.0;
+        const bufferFactor = 0.30;
+        const maxBuffer = 600;
+
+        // === CACHE SORTED RANGES (huge win) ===
+        const currentHash = this._computeVisitsHash();
+        if (!this._sortedVisitRanges || this._visitsHash !== currentHash) {
+            this._sortedVisitRanges = this.visits
+                .flatMap(p => p.activeRanges || [])
+                .sort((a, b) => a.start - b.start);
+            this._visitsHash = currentHash;
+        }
+
+        const ranges = this._sortedVisitRanges;
+        const n = this.cleanedCursor;
+
+        const weights = new Float64Array(n);
+        weights[0] = 0;
+
+        let cumulative = 0;
+        let rangeIdx = 0;
+        let lastPrevRange = null;
+
+        for (let i = 1; i < n; i++) {
+            const tsPrev = this.cleanedBuffer[(i - 1) * 6 + 3];
+            const tsCurr = this.cleanedBuffer[i * 6 + 3];
+            const dt = tsCurr - tsPrev;
+
+            if (dt <= 0) {
+                weights[i] = cumulative;
+                continue;
+            }
+
+            while (rangeIdx < ranges.length && ranges[rangeIdx].end < tsCurr) {
+                lastPrevRange = ranges[rangeIdx];
+                rangeIdx++;
+            }
+
+            let factor = tripWeight;
+            let inVisit = false;
+
+            for (let j = rangeIdx; j < ranges.length; j++) {
+                const r = ranges[j];
+                if (r.start > tsCurr) break;
+                if (tsCurr >= r.start && tsCurr <= r.end) {
+                    inVisit = true;
+                    factor = visitWeight;
+                    break;
+                }
+            }
+
+            if (!inVisit) {
+                let prevEnd = tsCurr - 3600;
+                let nextStart = tsCurr + 3600;
+
+                if (lastPrevRange && lastPrevRange.end < tsCurr) {
+                    prevEnd = lastPrevRange.end;
+                } else {
+                    for (let j = rangeIdx - 1; j >= 0; j--) {
+                        if (ranges[j].end < tsCurr) {
+                            prevEnd = ranges[j].end;
+                            lastPrevRange = ranges[j];
+                            break;
+                        }
+                    }
+                }
+
+                for (let j = rangeIdx; j < ranges.length; j++) {
+                    if (ranges[j].start > tsCurr) {
+                        nextStart = ranges[j].start;
+                        break;
+                    }
+                }
+
+                const tripDuration = nextStart - prevEnd;
+                const buffer = Math.min(tripDuration * bufferFactor, maxBuffer);
+
+                const distToNext = nextStart - tsCurr;
+                const distToPrev = tsCurr - prevEnd;
+
+                if (distToNext >= 0 && distToNext <= buffer) {
+                    const progress = 1 - (distToNext / buffer);
+                    const smooth = progress * progress * (3 - 2 * progress);
+                    factor = tripWeight - smooth * (tripWeight - visitWeight);
+                } else if (distToPrev >= 0 && distToPrev <= buffer) {
+                    const progress = distToPrev / buffer;
+                    const smooth = progress * progress * (3 - 2 * progress);
+                    factor = visitWeight + smooth * (tripWeight - visitWeight);
+                }
+            }
+
+            cumulative += dt * factor;
+            weights[i] = cumulative;
+        }
+
+        this.activityWeights = weights;
+        this.totalActivity = cumulative;
+    }
+
+    _computeVisitsHash() {
+        let hash = 17;
+        for (const visit of this.visits) {
+            for (const r of visit.activeRanges || []) {
+                hash = (hash * 31 + Math.imul(Math.floor(r.start), 0x85ebca6b)) | 0;
+                hash = (hash * 31 + Math.imul(Math.floor(r.end),   0xc2b2ae35)) | 0;
+            }
+        }
+        return hash >>> 0;
+    }
+
+    getDisplayTimestamp(linearProgress, useWarp = false, aggregate = false) {
+        if (aggregate || !useWarp || !this.activityWeights?.length) {
+            const total = this.maxTimestamp - this.minTimestamp;
+            return this.minTimestamp + linearProgress * total;
+        }
+
+        const target = linearProgress * this.totalActivity;
+        const weights = this.activityWeights;
+        let low = 0;
+        let high = weights.length - 1;
+
+        while (low <= high) {
+            const mid = (low + high) >> 1;
+            if (weights[mid] <= target) low = mid + 1;
+            else high = mid - 1;
+        }
+
+        const i = Math.max(0, low - 1);
+        if (i >= weights.length - 1) {
+            return this.cleanedBuffer[(weights.length - 1) * 6 + 3];
+        }
+
+        const w0 = weights[i];
+        const w1 = weights[i + 1];
+        const t0 = this.cleanedBuffer[i * 6 + 3];
+        const t1 = this.cleanedBuffer[(i + 1) * 6 + 3];
+
+        if (w1 === w0) return t0;
+        return t0 + ((target - w0) / (w1 - w0)) * (t1 - t0);
+    }
+
+    _hexToRgb(hex) {
+        const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+        return [r, g, b];
+    }
+
+    getCurrentVelocity(currentTime, isAggregate, lookbackSeconds = 30) {
+        const current = this.getCurrentPosition(currentTime, isAggregate);
+        if (!current) return 0;
+
+        let pastTime;
+        if (isAggregate) {
+            pastTime = currentTime - lookbackSeconds;
+            if (pastTime < 0) return 0;
+        } else {
+            pastTime = currentTime - lookbackSeconds;  // ← absolute timestamp minus lookback
+        }
+
+        const past = this.getCurrentPosition(pastTime, isAggregate);
+        if (!past) return 0;
+
+        const dLng = current.lng - past.lng;
+        const dLat = current.lat - past.lat;
+        return Math.sqrt(dLng * dLng + dLat * dLat) / lookbackSeconds;
+    }
+    getCurrentPosition(currentTime, isAggregate, useSmoothed = false) {
+        const cursor = useSmoothed ? this.smoothedCursor : this.cleanedCursor;
+        if (cursor === 0) {
+            return null;
+        }
+
+        const buffer = useSmoothed ? this.smoothedBuffer : this.cleanedBuffer;
+        const stride = 6;
+
+        if (isAggregate) {
+            // Aggregate mode: currentTime is seconds-of-day (0–86400)
+            let bestIdx = -1;
+            let bestDiff = Infinity;
+            for (let i = 0; i < cursor; i++) {
+                const aggTs = buffer[i * stride + 5];
+                const diff = Math.abs(aggTs - currentTime);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx === -1) return null;
+            return {
+                lng: buffer[bestIdx * stride],
+                lat: buffer[bestIdx * stride + 1]
+            };
+        } else {
+            // Non-aggregate: currentTime IS the absolute timestamp
+            const targetTs = currentTime;  // ← FIX: don't add minTimestamp
+
+            // Binary search by LinTs (index 3)
+            let lo = 0, hi = cursor - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >> 1;
+                if (buffer[mid * stride + 3] < targetTs) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            let bestIdx = lo;
+            if (lo > 0) {
+                const diffLo = Math.abs(buffer[lo * stride + 3] - targetTs);
+                const diffPrev = Math.abs(buffer[(lo - 1) * stride + 3] - targetTs);
+                if (diffPrev < diffLo) bestIdx = lo - 1;
+            }
+
+            if (bestIdx >= cursor) bestIdx = cursor - 1;
+
+            return {
+                lng: buffer[bestIdx * stride],
+                lat: buffer[bestIdx * stride + 1]
+            };
+        }
+    }
+
+    /**
+     * Binary search for the first cleaned point with timestamp >= targetTs.
+     * Unlike getCurrentPosition(), this never picks an earlier point, ensuring
+     * transition pills are placed at or after the segment boundary.
+     */
+    _firstPositionAtOrAfter(targetTs) {
+        if (this.cleanedCursor === 0) return null;
+        const buffer = this.cleanedBuffer;
+        const stride = 6;
+
+        let lo = 0, hi = this.cleanedCursor - 1;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (buffer[mid * stride + 3] < targetTs) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        if (lo >= this.cleanedCursor) return null;
+        return {
+            lng: buffer[lo * stride],
+            lat: buffer[lo * stride + 1]
+        };
+    }
+
+    /**
+     * Builds transport-mode segments and cut markers from the trip data.
+     * Segments are stored with absolute unix timestamps so the renderer can
+     * color the path by mode. Cut markers carry the exact [lng, lat] where the
+     * mode changes and the two adjacent modes for the pill visualization.
+     */
+    _computeTransitions() {
+        const transitions = [];
+        const modeSegments = [];
+        const trips = this.trips || [];
+        const minTs = this.tripsMinTimestamp;
+
+        for (const trip of trips) {
+            const segments = Array.isArray(trip.segments) ? trip.segments : [];
+            if (segments.length === 0) continue;
+
+            // Trip start in absolute unix seconds
+            let tripStartAbs = null;
+            if (trip.startTime != null) {
+                tripStartAbs = typeof trip.startTime === 'number' ? trip.startTime : Math.floor(new Date(trip.startTime).getTime() / 1000);
+            } else if (minTs != null && Array.isArray(trip.timestamps) && trip.timestamps.length > 0) {
+                tripStartAbs = minTs + trip.timestamps[0];
+            }
+
+            if (tripStartAbs != null) {
+                for (let i = 0; i < segments.length; i++) {
+                    const seg = segments[i];
+                    const start = tripStartAbs + Number(seg.offsetSeconds || 0);
+                    const end = start + Number(seg.durationSeconds || 0);
+                    modeSegments.push({
+                        start,
+                        end,
+                        mode: seg.mode,
+                        color: seg.color,
+                        icon: seg.icon
+                    });
+
+                    if (i > 0) {
+                        const from = segments[i - 1];
+                        if (from.mode === seg.mode) continue;
+                        const boundary = start;
+                        const pos = this._firstPositionAtOrAfter(boundary);
+                        if (pos) {
+                            transitions.push({
+                                lng: pos.lng,
+                                lat: pos.lat,
+                                time: boundary,
+                                from: { mode: from.mode, color: from.color, icon: from.icon },
+                                to: { mode: seg.mode, color: seg.color, icon: seg.icon }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        this.modeSegments = modeSegments.sort((a, b) => a.start - b.start);
+
+        // Ensure segments tile contiguously — fill any gaps
+        for (let i = 0; i < this.modeSegments.length - 1; i++) {
+            const cur = this.modeSegments[i];
+            const next = this.modeSegments[i + 1];
+            if (cur.end < next.start) {
+                cur.end = next.start;
+            }
+        }
+
+        this.transitions = transitions.sort((a, b) => a.time - b.time);
+    }
+
+    getModeSegments() {
+        return this.modeSegments || [];
+    }
+
+    getTransitions() {
+        return this.transitions || [];
+    }
+
+    getActiveSegment(currentTime, isAggregate) {
+        if (isAggregate || !this.modeSegments || this.modeSegments.length === 0) return null;
+        for (const seg of this.modeSegments) {
+            if (currentTime >= seg.start && currentTime <= seg.end) {
+                return seg;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Builds per-mode path arrays from the cleaned (or smoothed) buffer,
+     * colored by the transport mode of each segment. Every point is
+     * rendered: unsegmented or visit points receive default manager color,
+     * and adjacent segments share boundary vertices for a seamless,
+     * zero-gap line.
+     */
+    getSegmentPaths(useSmoothed = false) {
+        const segments = this.modeSegments;
+        const cursor = useSmoothed ? this.smoothedCursor : this.cleanedCursor;
+        if (!segments || segments.length === 0 || cursor === 0) {
+            return null;
+        }
+
+        // For large date ranges (> 7 days), use ultra-fast native binary path on GPU
+        const totalSpan = (this.maxTimestamp && this.minTimestamp) ? (this.maxTimestamp - this.minTimestamp) : 0;
+        if (totalSpan > 7 * 86400) {
+            return null;
+        }
+
+        const cacheHit = useSmoothed
+            ? (this._cachedSegmentPathsSmoothed && this._cachedSegmentPathsSmoothedCursor === cursor)
+            : (this._cachedSegmentPaths && this._cachedSegmentPathsCursor === this.cleanedCursor);
+        if (cacheHit) {
+            return useSmoothed ? this._cachedSegmentPathsSmoothed : this._cachedSegmentPaths;
+        }
+
+        const buffer = useSmoothed ? this.smoothedBuffer : this.cleanedBuffer;
+        const stride = 6;
+        const paths = [];
+        let segIdx = 0;
+        let current = null;
+
+        for (let i = 0; i < cursor; i++) {
+            const lng = buffer[i * stride];
+            const lat = buffer[i * stride + 1];
+            const ts = buffer[i * stride + 3];
+            const point = [lng, lat];
+
+            while (segIdx < segments.length && ts > segments[segIdx].end) {
+                segIdx++;
+            }
+
+            let activeColor = null;
+            let activeKey = -1;
+
+            if (segIdx < segments.length) {
+                const seg = segments[segIdx];
+                if (ts >= seg.start && ts <= seg.end) {
+                    activeColor = seg.color || null;
+                    activeKey = segIdx;
+                }
+            }
+
+            if (!current || current._key !== activeKey) {
+                if (current) {
+                    current.path.push(point);
+                }
+                current = { path: [point], color: activeColor, _key: activeKey };
+                paths.push(current);
+            } else {
+                current.path.push(point);
+            }
+        }
+
+        const result = paths.filter(p => p.path.length >= 2).map(p => ({ path: p.path, color: p.color }));
+        if (useSmoothed) {
+            this._cachedSegmentPathsSmoothed = result;
+            this._cachedSegmentPathsSmoothedCursor = cursor;
+        } else {
+            this._cachedSegmentPaths = result;
+            this._cachedSegmentPathsCursor = this.cleanedCursor;
+        }
+        return result;
+    }
+}

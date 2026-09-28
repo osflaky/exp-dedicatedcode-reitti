@@ -1,0 +1,354 @@
+package com.dedicatedcode.reitti.controller;
+
+import com.dedicatedcode.reitti.dto.timeline.*;
+import com.dedicatedcode.reitti.model.devices.Device;
+import com.dedicatedcode.reitti.model.geo.ProcessedVisit;
+import com.dedicatedcode.reitti.model.geo.TransportMode;
+import com.dedicatedcode.reitti.model.geo.TransportModeSegment;
+import com.dedicatedcode.reitti.model.geo.Trip;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.model.security.UserSettings;
+import com.dedicatedcode.reitti.repository.*;
+import com.dedicatedcode.reitti.service.AvatarService;
+import com.dedicatedcode.reitti.service.SuppressedVisitService;
+import com.dedicatedcode.reitti.service.TimeUtil;
+import com.dedicatedcode.reitti.service.TimelineService;
+import com.dedicatedcode.reitti.service.integration.ReittiIntegrationService;
+import com.dedicatedcode.reitti.service.processing.TransportModeService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Controller
+@RequestMapping("/timeline")
+public class TimelineController {
+
+    private final UserJdbcService userJdbcService;
+
+    private final AvatarService avatarService;
+    private final ReittiIntegrationService reittiIntegrationService;
+    private final DeviceJdbcService deviceJdbcService;
+    private final UserSharingJdbcService userSharingJdbcService;
+    private final TimelineService timelineService;
+    private final UserSettingsJdbcService userSettingsJdbcService;
+    private final TransportModeService transportModeService;
+    private final TripJdbcService tripJdbcService;
+    private final ProcessedVisitJdbcService processedVisitJdbcService;
+    private final SuppressedVisitService suppressedVisitService;
+    private final TimelineOverviewStatisticsService timelineOverviewStatisticsService;
+    private final boolean h3Enabled;
+
+    @Autowired
+    public TimelineController(UserJdbcService userJdbcService,
+                              AvatarService avatarService,
+                              ReittiIntegrationService reittiIntegrationService,
+                              DeviceJdbcService deviceJdbcService,
+                              UserSharingJdbcService userSharingJdbcService,
+                              TimelineService timelineService,
+                              UserSettingsJdbcService userSettingsJdbcService,
+                              TransportModeService transportModeService,
+                              TripJdbcService tripJdbcService,
+                              ProcessedVisitJdbcService processedVisitJdbcService,
+                              SuppressedVisitService suppressedVisitService,
+                              TimelineOverviewStatisticsService timelineOverviewStatisticsService,
+                              @Value("${reitti.h3.enabled:false}") boolean h3Enabled) {
+        this.userJdbcService = userJdbcService;
+        this.avatarService = avatarService;
+        this.reittiIntegrationService = reittiIntegrationService;
+        this.deviceJdbcService = deviceJdbcService;
+        this.userSharingJdbcService = userSharingJdbcService;
+        this.timelineService = timelineService;
+        this.userSettingsJdbcService = userSettingsJdbcService;
+        this.transportModeService = transportModeService;
+        this.tripJdbcService = tripJdbcService;
+        this.processedVisitJdbcService = processedVisitJdbcService;
+        this.suppressedVisitService = suppressedVisitService;
+        this.timelineOverviewStatisticsService = timelineOverviewStatisticsService;
+        this.h3Enabled = h3Enabled;
+    }
+
+    @GetMapping("/content/range")
+    public String getTimelineContentRange(@RequestParam LocalDate startDate,
+                                          @RequestParam LocalDate endDate,
+                                          @RequestParam(required = false, defaultValue = "UTC") ZoneId timezone,
+                                          @RequestParam(required = false) String active,
+                                          Authentication principal, Model model) {
+
+        List<String> authorities = principal.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList();
+        UserDeviceRequest userDeviceRequest = UserDeviceRequest.from(active);
+
+        User user = userJdbcService.findByUsername(principal.getName())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        UserSettings viewerSettings = userSettingsJdbcService.getOrCreateDefaultSettings(user.getId());
+        LocalTime dayStartTime = viewerSettings.getDayStartTime();
+
+        LocalDate now = TimeUtil.effectiveToday(timezone, dayStartTime);
+
+        if (!startDate.isEqual(now) || !endDate.isEqual(now)) {
+            if (!authorities.contains("ROLE_USER") && !authorities.contains("ROLE_ADMIN") && !authorities.contains("ROLE_MAGIC_LINK_FULL_ACCESS")) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+            }
+        }
+        List<UserTimelineData> allUsersData = new ArrayList<>();
+
+        UserTimelineData userData = createUserTimeLineData(user, viewerSettings, authorities, startDate, endDate, timezone, true, userDeviceRequest);
+        allUsersData.add(userData);
+
+        if (authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN")) {
+            allUsersData.addAll(this.reittiIntegrationService.getTimelineDataRange(user, startDate, endDate, timezone, userDeviceRequest));
+            allUsersData.addAll(handleSharedUserDataRange(user, viewerSettings, startDate, endDate, timezone, true, userDeviceRequest));
+        }
+
+        TimelineData timelineData = new TimelineData(allUsersData.stream().filter(Objects::nonNull).toList());
+        model.addAttribute("timelineData", timelineData);
+        model.addAttribute("startDate", startDate);
+        model.addAttribute("endDate", endDate);
+        model.addAttribute("timezone", timezone);
+        model.addAttribute("isRange", true);
+        model.addAttribute("timeDisplayMode", viewerSettings.getTimeDisplayMode());
+        model.addAttribute("showUserSelection", timelineData.users().size() > 1 || timelineData.users().stream().anyMatch(data -> data.devices().size() > 1 ));
+
+        return "fragments/timeline :: timeline-content";
+    }
+
+    private UserTimelineData createUserTimeLineData(User user, UserSettings viewerSettings, List<String> authorities, LocalDate startDate, LocalDate endDate, ZoneId timezone, boolean loadTimeline, UserDeviceRequest userDeviceRequest) {
+        LocalTime dayStartTime = viewerSettings.getDayStartTime();
+        Instant startOfRange = TimeUtil.startOfDay(startDate, timezone, dayStartTime);
+        Instant endOfRange = TimeUtil.endOfDay(endDate, timezone, dayStartTime);
+        boolean shouldAggregate = Duration.between(startOfRange, endOfRange).toDays() > 14;
+
+        List<? extends TimelineEntry> currentUserEntries;
+        if (loadTimeline && (authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN") || authorities.contains("ROLE_MAGIC_LINK_FULL_ACCESS"))) {
+            if (shouldAggregate) {
+                currentUserEntries = this.timelineOverviewStatisticsService.load(user, startOfRange, endOfRange, timezone, dayStartTime);
+            } else {
+                currentUserEntries = this.timelineService.buildTimelineEntries(user, timezone, startDate, startOfRange, endOfRange, authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN"));
+            }
+        } else {
+            currentUserEntries = Collections.emptyList();
+        }
+
+        boolean loadVisits = authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN") || authorities.contains("ROLE_MAGIC_LINK_FULL_ACCESS");
+        boolean loadPaths = authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN") || authorities.contains("ROLE_MAGIC_LINK_FULL_ACCESS") || authorities.contains("ROLE_MAGIC_LINK_ONLY_LIVE_WITH_PHOTOS") || authorities.contains("ROLE_MAGIC_LINK_ONLY_LIVE");
+        LocalDateTime rangeStart = startOfRange.atZone(timezone).toLocalDateTime();
+        LocalDateTime rangeEndInclusive = endOfRange.atZone(timezone).toLocalDateTime();
+        LocalDateTime rangeEndExclusive = endOfRange.plusMillis(1).minusSeconds(1).atZone(timezone).toLocalDateTime();
+        String currentUserProcessedVisitsUrl = loadVisits ? String.format("/api/v1/visits/%d?startDate=%s&endDate=%s&timezone=%s", user.getId(), rangeStart, rangeEndInclusive, timezone.getId()) : null;
+        String mapMetaDataUrl = String.format("/api/v2/locations/metadata/%d?start=%s&end=%s&timezone=%s", user.getId(), rangeStart, rangeEndExclusive, timezone.getId());
+        String mapStreamDataUrl = loadPaths ? String.format("/api/v2/locations/stream/%d?start=%s&end=%s&timezone=%s", user.getId(), rangeStart, rangeEndExclusive, timezone.getId()) : null;
+        String mapTripsUrl = loadPaths ? String.format("/api/v2/trips/%d?startDate=%s&endDate=%s&timezone=%s", user.getId(), rangeStart, rangeEndInclusive, timezone.getId()) : null;
+        String h3CellUrl = loadPaths && h3Enabled ? String.format("/api/v2/coverage/cells/%d?start=%s&end=%s&timezone=%s", user.getId(), startDate, endDate, timezone.getId()) : null;
+        String currentUserAvatarUrl = this.avatarService.getInfo(user.getId()).map(avatarInfo -> String.format("/avatars/%d?ts=%s", user.getId(), avatarInfo.updatedAt())).orElse(String.format("/avatars/%d", user.getId()));
+        String currentUserInitials = this.avatarService.generateInitials(user.getDisplayName());
+
+        List<DeviceTimelineData> enabledDevices = Collections.emptyList();
+        if (authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN") || authorities.contains("ROLE_MAGIC_LINK_FULL_ACCESS")) {
+            if (this.deviceJdbcService.getAllEnabled(user).stream().filter(Device::showOnMap).count() >= 2) {
+                enabledDevices = this.deviceJdbcService.getAllEnabled(user).stream()
+                        .filter(Device::showOnMap)
+                        .map(d -> new DeviceTimelineData(d.id(),
+                                                         d.name(),
+                                                         this.avatarService.getAvatarDeviceId(user.getId(), d.id()).map(data -> "/avatars/" + user.getId() + "/" + d.id() + "?ts=" + data.updatedAt()).orElse(null),
+                                                         this.avatarService.generateInitials(d.name()),
+                                                         d.enabled(),
+                                                         d.color(),
+                                                         String.format("/api/v2/locations/metadata/%d/device/%d?start=%s&end=%s&timezone=%s", user.getId(), d.id(), rangeStart, rangeEndExclusive, timezone.getId()),
+                                                          loadPaths ? String.format("/api/v2/locations/stream/%d/device/%d?start=%s&end=%s&timezone=%s", user.getId(), d.id(), rangeStart, rangeEndExclusive, timezone.getId()) : null,
+                                                         userDeviceRequest != null && Objects.equals(user.getId().toString(), userDeviceRequest.userId()) && Objects.equals(d.id(), userDeviceRequest.deviceId())))
+                        .toList();
+            }
+        }
+        return new UserTimelineData(user.getId() + "",
+                                    user.getDisplayName(),
+                                    currentUserInitials,
+                                    currentUserAvatarUrl,
+                                    viewerSettings.getColor(),
+                                    currentUserEntries,
+                                    null,
+                                    currentUserProcessedVisitsUrl,
+                                    mapMetaDataUrl,
+                                    mapStreamDataUrl,
+                                    mapTripsUrl,
+                                    h3CellUrl,
+                                    enabledDevices,
+                                    userDeviceRequest == null || (Objects.equals(user.getId().toString(), userDeviceRequest.userId()) && userDeviceRequest.deviceId() == null));
+    }
+
+    @GetMapping("/user-selection")
+    public String loadUserSelection(@RequestParam LocalDate startDate,
+                                    @RequestParam LocalDate endDate,
+                                    @RequestParam(required = false, defaultValue = "UTC") ZoneId timezone,
+                                    Authentication principal,
+                                    Model model) {
+        List<String> authorities = principal.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList();
+        List<UserTimelineData> allUsersData = new ArrayList<>();
+        User user = userJdbcService.findByUsername(principal.getName()).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        UserSettings viewerSettings = userSettingsJdbcService.getOrCreateDefaultSettings(user.getId());
+        UserTimelineData userData = createUserTimeLineData(user, viewerSettings, authorities, startDate, endDate, timezone, false, null);
+        allUsersData.add(userData);
+
+        if (authorities.contains("ROLE_USER") || authorities.contains("ROLE_ADMIN")) {
+            allUsersData.addAll(this.reittiIntegrationService.getUserData(user, startDate, endDate, timezone));
+            allUsersData.addAll(handleSharedUserDataRange(user, viewerSettings, startDate, endDate, timezone, false, null));
+        }
+
+        TimelineData timelineData = new TimelineData(allUsersData.stream().filter(Objects::nonNull).toList());
+        model.addAttribute("timelineData", timelineData);
+        model.addAttribute("showUserSelection", timelineData.users().size() > 1  || timelineData.users().stream().anyMatch(data -> data.devices().size() > 1 ));
+        return "fragments/user-selection :: user-selection";
+    }
+
+    @GetMapping("/trips/transport-mode-dialog/{id}")
+    public String getTransportModeDialog(@PathVariable Long id,
+                                         @RequestParam(required = false) String returnUrl,
+                                         @RequestParam(required = false, defaultValue = "UTC") ZoneId timezone,
+                                         Model model) {
+        Trip trip = tripJdbcService.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        model.addAttribute("tripId", id);
+        model.addAttribute("tripStartTime", TimeUtil.adjustInstant(trip.getStartTime(), timezone));
+        model.addAttribute("transportModeSegments", trip.getSegments());
+        model.addAttribute("transportModesSet", distinctModes(trip.getSegments()));
+        model.addAttribute("availableTransportModes", Arrays.stream(TransportMode.values()).filter(t -> t != TransportMode.UNKNOWN).toList());
+        model.addAttribute("returnUrl", returnUrl);
+        return "fragments/trip-edit :: transport-mode-dialog";
+    }
+
+    @PostMapping("/trips/{id}/transport-modes")
+    public String updateTripTransportModes(@PathVariable Long id,
+                                           @ModelAttribute TransportModeUpdateRequest request,
+                                           Authentication principal) {
+        User user = userJdbcService.findByUsername(principal.getName())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+
+        Trip trip = tripJdbcService.findById(id).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+        Map<Long, TransportMode> segmentUpdates = new HashMap<>();
+        for (TransportModeSegmentUpdate update : request.getSegments()) {
+            segmentUpdates.put(update.getOffsetSeconds(), update.getTransportMode());
+        }
+
+        List<TransportModeSegment> updated = trip.getSegments().stream()
+                .map(s -> {
+                    TransportMode newMode = segmentUpdates.get(s.offsetSeconds());
+                    return newMode != null ? new TransportModeSegment(newMode, s.offsetSeconds(), s.durationSeconds(), s.distanceMeters()) : s;
+                })
+                .toList();
+
+        for (TransportModeSegment segment : trip.getSegments()) {
+            TransportMode newMode = segmentUpdates.get(segment.offsetSeconds());
+            if (newMode != null && newMode != segment.mode()) {
+                transportModeService.overrideTransportModeSegment(user, newMode, trip, segment.offsetSeconds(), segment.durationSeconds());
+            }
+        }
+
+        updated = transportModeService.mergeSameModeSegments(updated);
+        tripJdbcService.update(trip.withSegments(updated));
+
+        String returnUrl = request.getReturnUrl();
+        if (returnUrl != null && !returnUrl.isBlank()) {
+            return "redirect:" + returnUrl;
+        }
+        return "redirect:/";
+    }
+
+    @GetMapping("/visits/{id}/delete-dialog")
+    public String getVisitDeleteDialog(@PathVariable Long id,
+                                       @RequestParam(required = false, defaultValue = "UTC") ZoneId timezone,
+                                       @AuthenticationPrincipal User user, Model model) {
+        ProcessedVisit visit = processedVisitJdbcService.findByUserAndId(user, id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        model.addAttribute("visitId", id);
+        model.addAttribute("placeName", visit.getPlace().getName());
+        model.addAttribute("visitStartTime", TimeUtil.adjustInstant(visit.getStartTime(), timezone));
+        model.addAttribute("visitEndTime", TimeUtil.adjustInstant(visit.getEndTime(), timezone));
+        return "fragments/visit-delete :: visit-delete-dialog";
+    }
+
+    @DeleteMapping("/visits/{id}")
+    @ResponseBody
+    public void deleteVisit(@PathVariable Long id, @AuthenticationPrincipal User user) {
+        ProcessedVisit visit = processedVisitJdbcService.findByUserAndId(user, id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        suppressedVisitService.suppressVisit(user, visit);
+    }
+
+    private List<TransportMode> distinctModes(List<TransportModeSegment> segments) {
+        return segments.stream()
+                .map(TransportModeSegment::mode)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    private List<UserTimelineData> handleSharedUserDataRange(User user, UserSettings viewerSettings, LocalDate startDate, LocalDate endDate, ZoneId userTimezone, boolean loadTimeline, UserDeviceRequest userDeviceRequest) {
+
+        return this.userSharingJdbcService.findBySharedWithUser(user.getId()).stream()
+                .map(u -> {
+                    Optional<User> sharedWithUserOpt = this.userJdbcService.findById(u.getSharingUserId());
+                    return sharedWithUserOpt.map(sharedWithUser -> {
+                        LocalTime dayStartTime = viewerSettings.getDayStartTime();
+                        Instant startOfRange = TimeUtil.startOfDay(startDate, userTimezone, dayStartTime);
+                        Instant endOfRange = TimeUtil.endOfDay(endDate, userTimezone, dayStartTime);
+                        boolean shouldAggregate = Duration.between(startOfRange, endOfRange).toDays() > 14;
+                        List<? extends TimelineEntry> userTimelineEntries;
+
+                        if (loadTimeline) {
+                            if (shouldAggregate) {
+                                userTimelineEntries = this.timelineOverviewStatisticsService.load(user, startOfRange, endOfRange, userTimezone, dayStartTime);
+                            } else {
+                                userTimelineEntries = this.timelineService.buildTimelineEntries(sharedWithUser, userTimezone, startDate, startOfRange, endOfRange, false);
+                            }
+                        } else {
+                            userTimelineEntries = Collections.emptyList();
+                        }
+                        LocalDateTime rangeStart = startOfRange.atZone(userTimezone).toLocalDateTime();
+                        LocalDateTime rangeEndInclusive = endOfRange.atZone(userTimezone).toLocalDateTime();
+                        LocalDateTime rangeEndExclusive = endOfRange.plusMillis(1).minusSeconds(1).atZone(userTimezone).toLocalDateTime();
+                        LocalDateTime rangeEndNextDay = endOfRange.plusMillis(1).atZone(userTimezone).toLocalDateTime();
+                        String currentUserRawLocationPointsUrl = String.format("/api/v1/raw-location-points/%d?startDate=%s&endDate=%s&timezone=%s", sharedWithUser.getId(), rangeStart, rangeEndNextDay, userTimezone.getId());
+                        String currentUserProcessedVisitsUrl = String.format("/api/v1/visits/%d?startDate=%s&endDate=%s&timezone=%s", sharedWithUser.getId(), rangeStart, rangeEndInclusive, userTimezone.getId());
+                        String mapMetaDataUrl = String.format("/api/v2/locations/metadata/%d?start=%s&end=%s&timezone=%s", sharedWithUser.getId(), rangeStart, rangeEndExclusive, userTimezone.getId());
+                        String mapStreamDataUrl = String.format("/api/v2/locations/stream/%d?start=%s&end=%s&timezone=%s", sharedWithUser.getId(), rangeStart, rangeEndExclusive, userTimezone.getId());
+                        String mapTripsUrl = String.format("/api/v2/trips/%d?startDate=%s&endDate=%s&timezone=%s", sharedWithUser.getId(), rangeStart, rangeEndInclusive, userTimezone.getId());
+                        String h3CellUrl = h3Enabled ? String.format("/api/v2/coverage/cells/%d?start=%s&end=%s&timezone=%s", user.getId(), startDate, endDate, userTimezone.getId()) : null;
+                        String currentUserAvatarUrl = this.avatarService.getInfo(sharedWithUser.getId()).map(avatarInfo -> String.format("/avatars/%d?ts=%s", sharedWithUser.getId(), avatarInfo.updatedAt())).orElse(String.format("/avatars/%d", sharedWithUser.getId()));
+                        String currentUserInitials = this.avatarService.generateInitials(sharedWithUser.getDisplayName());
+
+                        return new UserTimelineData(sharedWithUser.getId() + "",
+                                                    sharedWithUser.getDisplayName(),
+                                                    currentUserInitials,
+                                                    currentUserAvatarUrl,
+                                                    u.getColor(),
+                                                    userTimelineEntries,
+                                                    currentUserRawLocationPointsUrl,
+                                                    currentUserProcessedVisitsUrl,
+                                                    mapMetaDataUrl,
+                                                    mapStreamDataUrl,
+                                                    mapTripsUrl,
+                                                    h3CellUrl,
+                                                    Collections.emptyList(),
+                                                    userDeviceRequest != null && sharedWithUser.getId().toString().equals(userDeviceRequest.userId()));
+                    });
+                })
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .sorted(Comparator.comparing(UserTimelineData::displayName))
+                .toList();
+    }
+
+}

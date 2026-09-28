@@ -1,0 +1,669 @@
+package com.dedicatedcode.reitti.repository;
+
+import com.dedicatedcode.reitti.controller.api.v2.CoverageController;
+import com.dedicatedcode.reitti.dto.LocationPoint;
+import com.dedicatedcode.reitti.dto.MapMetadata;
+import com.dedicatedcode.reitti.model.geo.GeoPoint;
+import com.dedicatedcode.reitti.model.geo.RawLocationPoint;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.service.SpatialCoverageService;
+import com.dedicatedcode.reitti.service.processing.TimeRange;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.GeometryFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Timestamp;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+@Service
+@Transactional
+public class RawLocationPointJdbcService {
+    private final JdbcTemplate jdbcTemplate;
+    private final RowMapper<RawLocationPoint> rawLocationPointRowMapper;
+    private final SpatialCoverageService spatialCoverageService;
+    private final PointReaderWriter pointReaderWriter;
+    private final GeometryFactory geometryFactory;
+    private final int pointChunkSize;
+
+    public RawLocationPointJdbcService(JdbcTemplate jdbcTemplate,
+                                       PointReaderWriter pointReaderWriter,
+                                       SpatialCoverageService spatialCoverageService,
+                                       GeometryFactory geometryFactory,
+                                       @Value("${reitti.processing.point-chunk-size:5000}") int pointChunkSize) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.rawLocationPointRowMapper = (rs, _) -> new RawLocationPoint(
+                rs.getLong("id"),
+                (Long) rs.getObject("source_point_id"),
+                rs.getTimestamp("timestamp").toInstant(),
+                pointReaderWriter.read(rs.getString("geom")),
+                rs.getDouble("accuracy_meters"),
+                rs.getObject("elevation_meters", Double.class),
+                rs.getBoolean("processed"),
+                rs.getBoolean("synthetic"),
+                rs.getLong("version")
+        );
+
+        this.pointReaderWriter = pointReaderWriter;
+        this.spatialCoverageService = spatialCoverageService;
+        this.geometryFactory = geometryFactory;
+        this.pointChunkSize = pointChunkSize;
+    }
+
+
+    public List<RawLocationPoint> findByUserAndTimestampBetweenOrderByTimestampAsc(
+            User user, Instant startTime, Instant endTime) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.user_id = ? AND rlp.timestamp >= ? AND rlp.timestamp < ? " +
+                "ORDER BY rlp.timestamp";
+        return jdbcTemplate.query(sql, rawLocationPointRowMapper,
+                user.getId(), Timestamp.from(startTime), Timestamp.from(endTime));
+    }
+
+    public List<RawLocationPoint> findByUserAndTimestampBetweenOrderByTimestampAsc(User user, Instant startTime, Instant endTime, boolean includeSynthetic, boolean includeIgnored) {
+        StringBuilder sql = new StringBuilder()
+                .append("SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version ")
+                .append("FROM raw_location_points rlp ")
+                .append("WHERE rlp.user_id = ? ");
+        if (!includeSynthetic) {
+            sql.append("AND rlp.synthetic = false ");
+        }
+
+        if (!includeIgnored) {
+            sql.append("AND rlp.status = 0 ");
+        }
+        sql.append("AND rlp.timestamp >= ? AND rlp.timestamp < ? ORDER BY rlp.timestamp");
+        return jdbcTemplate.query(sql.toString(), rawLocationPointRowMapper,
+                                  user.getId(), Timestamp.from(startTime), Timestamp.from(endTime));
+    }
+
+    public List<RawLocationPoint> findByUserAndTimestampBetweenOrderByTimestampAsc(
+            User user, Instant startTime, Instant endTime, boolean includeSynthetic, int page, int pageSize) {
+        StringBuilder sql = new StringBuilder()
+                .append("SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version ")
+                .append("FROM raw_location_points rlp ")
+                .append("WHERE rlp.user_id = ? ");
+        if (!includeSynthetic) {
+            sql.append("AND rlp.synthetic = false ");
+        }
+        sql.append("AND rlp.timestamp >= ? AND rlp.timestamp < ? ORDER BY rlp.timestamp")
+                .append(" OFFSET ").append(page * pageSize).append(" LIMIT ").append(pageSize);
+        return jdbcTemplate.query(sql.toString(), rawLocationPointRowMapper,
+                                  user.getId(), Timestamp.from(startTime), Timestamp.from(endTime));
+    }
+
+    /**
+     * Streams all points of the user inside [startTime, endTime) in bounded
+     * chunks ordered by (timestamp, id), without materializing the whole range.
+     */
+    public RawLocationPointStream streamByUserAndTimestampBetween(User user, Instant startTime, Instant endTime,
+                                                                  boolean includeSynthetic, boolean includeIgnored) {
+        StringBuilder statsSql = new StringBuilder()
+                .append("SELECT count(*) AS point_count, min(timestamp) AS min_ts, max(timestamp) AS max_ts ")
+                .append("FROM raw_location_points WHERE user_id = ? ");
+        if (!includeSynthetic) {
+            statsSql.append("AND synthetic = false ");
+        }
+        if (!includeIgnored) {
+            statsSql.append("AND status = 0 ");
+        }
+        statsSql.append("AND timestamp >= ? AND timestamp < ?");
+        RawLocationPointStream.Stats stats = this.jdbcTemplate.query(statsSql.toString(), PointStreamSupport.STATS_EXTRACTOR,
+                user.getId(), Timestamp.from(startTime), Timestamp.from(endTime));
+        return new RawLocationPointStream(stats,
+                (afterTimestamp, afterId, limit) -> fetchPointChunk(user, startTime, endTime, includeSynthetic, includeIgnored, afterTimestamp, afterId, limit),
+                pointChunkSize);
+    }
+
+    /**
+     * Streams all points (synthetic and ignored included) of the user inside
+     * [startTime, endTime), matching
+     * {@link #findByUserAndTimestampBetweenOrderByTimestampAsc(User, Instant, Instant)}.
+     */
+    public RawLocationPointStream streamByUserAndTimestampBetween(User user, Instant startTime, Instant endTime) {
+        return streamByUserAndTimestampBetween(user, startTime, endTime, true, true);
+    }
+
+    private List<RawLocationPoint> fetchPointChunk(User user, Instant startTime, Instant endTime,
+                                                   boolean includeSynthetic, boolean includeIgnored,
+                                                   Instant afterTimestamp, Long afterId, int limit) {
+        Timestamp after = afterTimestamp != null ? Timestamp.from(afterTimestamp) : null;
+        StringBuilder sql = new StringBuilder()
+                .append("SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version ")
+                .append("FROM raw_location_points rlp ")
+                .append("WHERE rlp.user_id = ? ");
+        if (!includeSynthetic) {
+            sql.append("AND rlp.synthetic = false ");
+        }
+        if (!includeIgnored) {
+            sql.append("AND rlp.status = 0 ");
+        }
+        sql.append("AND rlp.timestamp >= ? AND rlp.timestamp < ? ");
+        PointStreamSupport.appendKeysetPredicate(sql, after);
+        sql.append("ORDER BY rlp.timestamp, rlp.id LIMIT ?");
+        if (after != null) {
+            return jdbcTemplate.query(sql.toString(), rawLocationPointRowMapper,
+                    user.getId(), Timestamp.from(startTime), Timestamp.from(endTime),
+                    after, after, afterId, limit);
+        }
+        return jdbcTemplate.query(sql.toString(), rawLocationPointRowMapper,
+                user.getId(), Timestamp.from(startTime), Timestamp.from(endTime), limit);
+    }
+
+    public List<RawLocationPoint> findByUserAndProcessedIsFalseOrderByTimestampWithLimit(User user, int limit, int offset) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.user_id = ? AND rlp.processed = false " +
+                "ORDER BY rlp.timestamp " +
+                "LIMIT ? OFFSET ?";
+        return jdbcTemplate.query(sql, rawLocationPointRowMapper, user.getId(), limit, offset);
+    }
+
+    public List<Integer> findDistinctYearsByUser(User user) {
+        String sql = """
+                SELECT DISTINCT EXTRACT(YEAR FROM day)
+                  FROM location_daily_summary
+                WHERE user_id = ?
+                ORDER BY EXTRACT(YEAR FROM day) DESC
+                """;
+        return jdbcTemplate.queryForList(sql, Integer.class, user.getId());
+    }
+
+    public RawLocationPoint create(User user, RawLocationPoint rawLocationPoint) {
+        String sql = "INSERT INTO raw_location_points (user_id, timestamp, accuracy_meters, elevation_meters, geom, processed, synthetic) " +
+                "VALUES (?, ?, ?, ?, ST_GeomFromText(?, '4326'), ?, ?) ON CONFLICT DO NOTHING RETURNING id";
+        Long id = jdbcTemplate.queryForObject(sql, Long.class,
+                user.getId(),
+                Timestamp.from(rawLocationPoint.getTimestamp()),
+                rawLocationPoint.getAccuracyMeters(),
+                rawLocationPoint.getElevationMeters(),
+                pointReaderWriter.write(rawLocationPoint.getGeom()),
+                rawLocationPoint.isProcessed(),
+                rawLocationPoint.isSynthetic()
+        );
+        return rawLocationPoint.withId(id);
+    }
+
+    public RawLocationPoint update(RawLocationPoint rawLocationPoint) {
+        String sql = "UPDATE raw_location_points SET timestamp = ?, accuracy_meters = ?, elevation_meters = ?, geom = ST_GeomFromText(?, '4326'), processed = ?, synthetic = ? WHERE id = ?";
+        jdbcTemplate.update(sql,
+                Timestamp.from(rawLocationPoint.getTimestamp()),
+                rawLocationPoint.getAccuracyMeters(),
+                rawLocationPoint.getElevationMeters(),
+                pointReaderWriter.write(rawLocationPoint.getGeom()),
+                rawLocationPoint.isProcessed(),
+                rawLocationPoint.isSynthetic(),
+                rawLocationPoint.getId()
+        );
+        return rawLocationPoint;
+    }
+
+    public Optional<RawLocationPoint> findById(Long id) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.id = ?";
+        List<RawLocationPoint> results = jdbcTemplate.query(sql, rawLocationPointRowMapper, id);
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.getFirst());
+    }
+
+    public Optional<RawLocationPoint> findLatest(User user, Instant since) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.user_id = ? AND rlp.timestamp >= ? " +
+                "ORDER BY rlp.timestamp LIMIT 1";
+        List<RawLocationPoint> results = jdbcTemplate.query(sql, rawLocationPointRowMapper, user.getId(), Timestamp.from(since));
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.getFirst());
+    }
+
+    public Optional<RawLocationPoint> findLatest(User user) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.user_id = ? " +
+                "ORDER BY rlp.timestamp DESC LIMIT 1";
+        List<RawLocationPoint> results = jdbcTemplate.query(sql, rawLocationPointRowMapper, user.getId());
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.getFirst());
+    }
+
+    public Optional<RawLocationPoint> findEarliest(User user) {
+        String sql = "SELECT rlp.id, rlp.source_point_id, rlp.accuracy_meters, rlp.elevation_meters, rlp.timestamp, rlp.user_id, ST_AsText(rlp.geom) as geom, rlp.processed, rlp.synthetic, rlp.version " +
+                "FROM raw_location_points rlp " +
+                "WHERE rlp.user_id = ? " +
+                "ORDER BY rlp.timestamp ASC LIMIT 1";
+        List<RawLocationPoint> results = jdbcTemplate.query(sql, rawLocationPointRowMapper, user.getId());
+        return results.isEmpty() ? Optional.empty() : Optional.of(results.getFirst());
+    }
+
+    @SuppressWarnings("DataFlowIssue")
+    public long count() {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM raw_location_points", Long.class);
+    }
+
+    @SuppressWarnings("DataFlowIssue")
+    public List<RawLocationPoint> findPointsInBoxWithNeighbors(
+            User user,
+            Instant startTime,
+            Instant endTime,
+            double minLat,
+            double maxLat,
+            double minLon,
+            double maxLon,
+            int maxPoints) {
+        String countSql = """
+            SELECT COUNT(*)
+            FROM (
+                SELECT *
+                FROM raw_location_points
+                WHERE user_id = ?
+                  AND ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326))
+                  AND timestamp >= ?::timestamp AND timestamp < ?::timestamp
+                LIMIT ?
+            )
+        """;
+
+        Long relevantPointCount = jdbcTemplate.queryForObject(countSql, Long.class,
+                                                              minLon, minLat, maxLon, maxLat,
+                                                              user.getId(),
+                                                              Timestamp.from(startTime),
+                                                              Timestamp.from(endTime),
+                                                              maxPoints == Integer.MAX_VALUE ? maxPoints : maxPoints + 1
+        );
+
+        // If we have fewer points than the budget, return all without sampling
+        if (relevantPointCount <= maxPoints) {
+            String sql = """
+            WITH box_filtered_points AS (
+                SELECT
+                    id,
+                    source_point_id,
+                    user_id,
+                    timestamp,
+                    geom,
+                    accuracy_meters,
+                    elevation_meters,
+                    processed,
+                    synthetic,
+                    version,
+                    ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)) as in_box,
+                    LAG(ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)))
+                        OVER (ORDER BY timestamp) as prev_in_box,
+                    LEAD(ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)))
+                        OVER (ORDER BY timestamp) as next_in_box
+                FROM raw_location_points
+                WHERE user_id = ?
+                  AND timestamp >= ?::timestamp AND timestamp < ?::timestamp
+            )
+            SELECT
+                id,
+                source_point_id,
+                user_id,
+                timestamp,
+                ST_AsText(geom) as geom,
+                accuracy_meters,
+                elevation_meters,
+                processed,
+                synthetic,
+                version
+            FROM box_filtered_points
+            WHERE in_box = true
+               OR prev_in_box = true
+               OR next_in_box = true
+            ORDER BY timestamp
+            """;
+
+            return jdbcTemplate.query(sql, rawLocationPointRowMapper,
+                                      minLon, minLat, maxLon, maxLat,
+                                      minLon, minLat, maxLon, maxLat,
+                                      minLon, minLat, maxLon, maxLat,
+                                      user.getId(),
+                                      Timestamp.from(startTime),
+                                      Timestamp.from(endTime)
+            );
+        }
+
+        // Otherwise, apply sampling
+        Duration period = Duration.between(startTime, endTime);
+        long intervalMinutes = Math.max(1, period.toMinutes() / maxPoints);
+
+        String sql = """
+        WITH box_filtered_points AS (
+            SELECT
+                id,
+                source_point_id,
+                user_id,
+                timestamp,
+                geom,
+                accuracy_meters,
+                elevation_meters,
+                processed,
+                synthetic,
+                version,
+                ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)) as in_box,
+                LAG(ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)))
+                    OVER (ORDER BY timestamp) as prev_in_box,
+                LEAD(ST_Within(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326)))
+                    OVER (ORDER BY timestamp) as next_in_box
+            FROM raw_location_points
+            WHERE user_id = ?
+              AND timestamp >= ?::timestamp AND timestamp < ?::timestamp
+        ),
+        relevant_points AS (
+            SELECT *
+            FROM box_filtered_points
+            WHERE in_box = true
+               OR prev_in_box = true
+               OR next_in_box = true
+        ),
+        sampled_points AS (
+            SELECT DISTINCT ON (
+                date_trunc('hour', timestamp) +
+                (EXTRACT(minute FROM timestamp)::int / %d) * interval '%d minutes'
+            )
+            id,
+            source_point_id,
+            user_id,
+            timestamp,
+            geom,
+            accuracy_meters,
+            elevation_meters,
+            processed,
+            synthetic,
+            version
+            FROM relevant_points
+            ORDER BY
+                date_trunc('hour', timestamp) +
+                (EXTRACT(minute FROM timestamp)::int / %d) * interval '%d minutes',
+                timestamp
+        )
+        SELECT
+            id,
+            source_point_id,
+            user_id,
+            timestamp,
+            ST_AsText(geom) as geom,
+            accuracy_meters,
+            elevation_meters,
+            processed,
+            synthetic,
+            version
+        FROM sampled_points
+        ORDER BY timestamp
+        """.formatted(intervalMinutes, intervalMinutes, intervalMinutes, intervalMinutes);
+
+        return jdbcTemplate.query(sql, rawLocationPointRowMapper,
+                                  minLon, minLat, maxLon, maxLat,
+                                  minLon, minLat, maxLon, maxLat,
+                                  minLon, minLat, maxLon, maxLat,
+                                  user.getId(),
+                                  Timestamp.from(startTime),
+                                  Timestamp.from(endTime)
+        );
+    }
+
+    public List<RawLocationPoint> findSimplifiedRouteForPeriod(
+            User user,
+            Instant startTime,
+            Instant endTime) {
+
+        int maxPoints = 10000;
+        // Calculate sampling interval based on time range and desired point count
+        Duration period = Duration.between(startTime, endTime);
+        long intervalMinutes = Math.max(1, period.toMinutes() / maxPoints);
+
+        String sql = """
+        WITH sampled_points AS (
+            SELECT DISTINCT ON (
+                date_trunc('hour', timestamp) +
+                (EXTRACT(minute FROM timestamp)::int / %d) * interval '%d minutes'
+            )
+            id,
+            source_point_id,
+            timestamp,
+            geom,
+            accuracy_meters,
+            elevation_meters,
+            processed,
+            synthetic,
+            version
+            FROM raw_location_points
+            WHERE user_id = ?
+              AND timestamp >= ? AND timestamp < ?
+            ORDER BY
+                date_trunc('hour', timestamp) +
+                (EXTRACT(minute FROM timestamp)::int / %d) * interval '%d minutes',
+                timestamp
+        )
+        SELECT
+            id,
+            source_point_id,
+            accuracy_meters,
+            elevation_meters,
+            timestamp,
+            ST_AsText(geom) as geom,
+            processed,
+            synthetic,
+            version
+        FROM sampled_points
+        ORDER BY timestamp
+        """.formatted(intervalMinutes, intervalMinutes, intervalMinutes, intervalMinutes);
+
+        return jdbcTemplate.query(sql,
+                                  rawLocationPointRowMapper,
+                                  user.getId(),
+                                  Timestamp.from(startTime), Timestamp.from(endTime));
+    }
+
+    @SuppressWarnings("DataFlowIssue")
+    public long countByUser(User user) {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM raw_location_points WHERE user_id = ?", Long.class, user.getId());
+    }
+
+    public void bulkUpdateProcessedStatus(List<RawLocationPoint> points) {
+        if (points.isEmpty()) {
+            return;
+        }
+        
+        String sql = "UPDATE raw_location_points SET processed = true WHERE id = ?";
+        
+        List<Object[]> batchArgs = points.stream()
+                .map(point -> new Object[]{point.getId()})
+                .collect(Collectors.toList());
+        
+        jdbcTemplate.batchUpdate(sql, batchArgs);
+    }
+
+    public void deleteAll() {
+        String sql = "DELETE FROM raw_location_points";
+        jdbcTemplate.update(sql);
+    }
+
+    public void markAllAsUnprocessedForUser(User user) {
+        String sql = "UPDATE raw_location_points SET processed = false WHERE user_id = ?";
+        jdbcTemplate.update(sql, user.getId());
+    }
+
+    public void markAllAsUnprocessedForUser(User user, List<LocalDate> affectedDays) {
+        this.jdbcTemplate.update("UPDATE raw_location_points SET processed = false WHERE user_id = ? AND date_trunc('day', timestamp) = ANY(?)",
+                                 user.getId(),
+                                 affectedDays.stream().map(d -> Timestamp.valueOf(d.atStartOfDay())).toList().toArray(new Timestamp[0]));
+    }
+
+    public void markUnprocessedForUserAndTimeRange(User user, Instant start, Instant end) {
+        this.jdbcTemplate.update("UPDATE raw_location_points SET processed = false WHERE user_id = ? AND timestamp >= ? AND timestamp <= ?",
+                                 user.getId(), Timestamp.from(start), Timestamp.from(end));
+    }
+
+    public void markUnprocessedForUserAndBoundingBox(User user, double minLatitude, double maxLatitude, double minLongitude, double maxLongitude) {
+        this.jdbcTemplate.update("UPDATE raw_location_points SET processed = false WHERE user_id = ? AND ST_Intersects(geom, ST_MakeEnvelope(?, ?, ?, ?, 4326))",
+                                 user.getId(), minLongitude, minLatitude, maxLongitude, maxLatitude);
+    }
+
+    public void deleteAllForUser(User user) {
+        String sql = "DELETE FROM raw_location_points WHERE user_id = ?";
+        jdbcTemplate.update(sql, user.getId());
+    }
+
+    public void replaceLatestForUser(User user, LocationPoint locationPoint) {
+        this.jdbcTemplate.update(
+                """
+                INSERT INTO raw_location_points (user_id, timestamp, accuracy_meters, elevation_meters, geom, processed, synthetic)
+                VALUES (?, ?, ?, ?, ST_GeomFromText(?, '4326'), false, false)
+                ON CONFLICT (user_id, timestamp) DO UPDATE SET
+                    accuracy_meters = EXCLUDED.accuracy_meters,
+                    elevation_meters = EXCLUDED.elevation_meters,
+                    geom = EXCLUDED.geom
+                """,
+                user.getId(),
+                Timestamp.from(locationPoint.getTimestamp()),
+                locationPoint.getAccuracyMeters(),
+                locationPoint.getElevationMeters(),
+                pointReaderWriter.write(new GeoPoint(locationPoint.getLatitude(), locationPoint.getLongitude()))
+        );
+        this.jdbcTemplate.update(
+                "DELETE FROM raw_location_points WHERE user_id = ? AND timestamp < ?",
+                user.getId(), Timestamp.from(locationPoint.getTimestamp())
+        );
+    }
+
+    public Optional<RawLocationPoint> findProximatePoint(User user, Instant when, int maxOffsetInSeconds) {
+        List<RawLocationPoint> result = findByUserAndTimestampBetweenOrderByTimestampAsc(user, when.minusSeconds(maxOffsetInSeconds / 2), when.plusSeconds(maxOffsetInSeconds / 2));
+        return result.stream().findFirst();
+    }
+
+    public boolean containsData(User user, Instant start, Instant end) {
+        Integer count = this.jdbcTemplate.queryForObject("SELECT count(*) FROM raw_location_points WHERE user_id = ? AND timestamp >= ? AND timestamp < ? LIMIT 1",
+                Integer.class,
+                user.getId(),
+                start != null ? Timestamp.from(start) : Timestamp.valueOf("1970-01-01 00:00:00"),
+                Timestamp.from(end));
+        return count != null && count > 0;
+    }
+
+    public boolean containsDataAfter(User user, Instant start) {
+        Integer count = this.jdbcTemplate.queryForObject("SELECT count(*) FROM raw_location_points WHERE user_id = ? AND timestamp > ? LIMIT 1",
+                Integer.class,
+                user.getId(),
+                Timestamp.from(start));
+        return count != null && count > 0;
+    }
+
+    public int bulkInsertSynthetic(User user, List<LocationPoint> syntheticPoints) {
+        if (syntheticPoints.isEmpty()) {
+            return 0;
+        }
+        String sql = "INSERT INTO raw_location_points (user_id, timestamp, accuracy_meters, elevation_meters, geom, processed, synthetic, h3_cell) " +
+                "VALUES (?, ?, ?, ?, CAST(? AS geometry), false, true, ?) ON CONFLICT DO NOTHING;";
+
+        List<Object[]> batchArgs = new ArrayList<>();
+        for (LocationPoint point : syntheticPoints) {
+            batchArgs.add(new Object[]{
+                    user.getId(),
+                    Timestamp.from(point.getTimestamp()),
+                    point.getAccuracyMeters(),
+                    point.getElevationMeters(),
+                    geometryFactory.createPoint(new Coordinate(point.getLongitude(), point.getLatitude())).toString(),
+                    spatialCoverageService.getLevelCellForPoint(point.getLatitude(), point.getLongitude(), 12)
+            });
+        }
+        int[] ints = jdbcTemplate.batchUpdate(sql, batchArgs);
+        return Arrays.stream(ints).sum();
+    }
+    
+    public void deleteSyntheticPointsInRange(User user, Instant start, Instant end) {
+        String sql = "DELETE FROM raw_location_points WHERE user_id = ? AND timestamp >= ? AND timestamp < ? AND synthetic = true";
+        jdbcTemplate.update(sql, user.getId(), Timestamp.from(start), Timestamp.from(end));
+    }
+
+    public MapMetadata getMetadata(User user, Instant start, Instant end) {
+
+        boolean useRawTable = Duration.between(start, end).toDays() <= 31;
+
+        String sql = useRawTable ? """
+                SELECT
+                  EXTRACT(EPOCH FROM MIN(timestamp)) as min_ts,
+                  EXTRACT(EPOCH FROM MAX(timestamp)) as max_ts,
+                  COUNT(*) as total_count,
+                  ST_YMin(ST_Extent(geom)) as min_lat,
+                  ST_YMax(ST_Extent(geom)) as max_lat,
+                  ST_XMin(ST_Extent(geom)) as min_lng,
+                  ST_XMax(ST_Extent(geom)) as max_lng
+                FROM raw_location_points
+                WHERE user_id = ?
+                  AND timestamp >= ? AND timestamp < ?
+                """ : """
+                SELECT
+                  EXTRACT(EPOCH FROM MIN(min_ts)) as min_ts,
+                  EXTRACT(EPOCH FROM MAX(max_ts)) as max_ts,
+                  SUM(point_count) as total_count,
+                  MIN(ST_YMin(bbox::geometry)) as min_lat,
+                  MAX(ST_YMax(bbox::geometry)) as max_lat,
+                  MIN(ST_XMin(bbox::geometry)) as min_lng,
+                  MAX(ST_XMax(bbox::geometry)) as max_lng
+                FROM location_daily_summary
+                WHERE user_id = ?
+                  AND day >= ?::date AND day < ?::date
+                """;
+        return jdbcTemplate.queryForObject(sql, (rs, rowNum) -> new MapMetadata(
+                rs.getLong("min_ts"),
+                rs.getLong("max_ts"),
+                rs.getLong("total_count"),
+                rs.getDouble("min_lat"),
+                rs.getDouble("max_lat"),
+                rs.getDouble("min_lng"),
+                rs.getDouble("max_lng"),
+                this.findLatest(user).map(rawLocationPoint -> {
+                    LocationPoint locationPoint = new LocationPoint();
+                    locationPoint.setTimestamp(rawLocationPoint.getTimestamp());
+                    locationPoint.setLatitude(rawLocationPoint.getLatitude());
+                    locationPoint.setLongitude(rawLocationPoint.getLongitude());
+                    locationPoint.setAccuracyMeters(rawLocationPoint.getAccuracyMeters());
+                    locationPoint.setElevationMeters(rawLocationPoint.getElevationMeters());
+                    return locationPoint;
+                })
+        ), user.getId(), Timestamp.from(start), Timestamp.from(end));
+    }
+
+    @SuppressWarnings("DataFlowIssue")
+    public long countUnprocessedByUser(User user) {
+        return this.jdbcTemplate.queryForObject("SELECT COUNT(*) FROM raw_location_points WHERE user_id = ? AND processed = false", Long.class, user.getId());
+    }
+
+    public void dropForReSeeding(User user, TimeRange timeRange) {
+        this.jdbcTemplate.update("DELETE FROM raw_location_points WHERE user_id = ? AND timestamp >= ? AND timestamp < ?",
+                                 user.getId(),
+                                 Timestamp.from(timeRange.start()),
+                                 Timestamp.from(timeRange.end()));
+    }
+
+    public int updateFromDevices(User user, TimeRange timeRange) {
+       return this.jdbcTemplate.update("""
+                INSERT INTO raw_location_points
+                (accuracy_meters, timestamp, user_id, geom, elevation_meters, source_point_id, processed, synthetic, status, h3_cell)
+                SELECT DISTINCT
+                  accuracy_meters, timestamp, user_id, geom, elevation_meters, source_point_id, FALSE, FALSE, status, h3_cell
+                FROM v_source_stream
+                WHERE user_id = ? AND timestamp  >= ? AND timestamp < ?
+                """
+               ,user.getId(), Timestamp.from(timeRange.start()), Timestamp.from(timeRange.end()));
+    }
+
+    public List<CoverageController.H3CellCount> findVisitedH3CellsCounts(Long userId, Instant startOfRange, Instant endOfRange) {
+        return this.jdbcTemplate.query("""
+                                           SELECT h3_cell, COUNT(*), date_bin('5 minutes', timestamp, TIMESTAMP '2001-01-01') AS time_bucket
+                                           FROM raw_location_points WHERE user_id = ? AND timestamp >= ? AND timestamp < ? AND h3_cell IS NOT NULL GROUP BY h3_cell, time_bucket;
+                                           """, (rs, _) -> new CoverageController.H3CellCount(rs.getString("h3_cell"), rs.getTimestamp("time_bucket").toInstant(), rs.getLong("count")),
+                                userId,
+                                Timestamp.from(startOfRange),
+                                Timestamp.from(endOfRange));
+    }
+}

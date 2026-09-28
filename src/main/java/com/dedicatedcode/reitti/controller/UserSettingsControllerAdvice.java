@@ -1,0 +1,181 @@
+package com.dedicatedcode.reitti.controller;
+
+import com.dedicatedcode.reitti.dto.UserSettingsDTO;
+import com.dedicatedcode.reitti.model.Language;
+import com.dedicatedcode.reitti.model.TimeDisplayMode;
+import com.dedicatedcode.reitti.model.TimeMode;
+import com.dedicatedcode.reitti.model.UnitSystem;
+import com.dedicatedcode.reitti.model.UserType;
+import com.dedicatedcode.reitti.model.geo.RawLocationPoint;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.model.security.UserSettings;
+import com.dedicatedcode.reitti.repository.RawLocationPointJdbcService;
+import com.dedicatedcode.reitti.repository.UserJdbcService;
+import com.dedicatedcode.reitti.repository.UserSettingsJdbcService;
+import com.dedicatedcode.reitti.service.TilesCustomizationProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ModelAttribute;
+
+import java.time.Instant;
+import java.time.temporal.ChronoField;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+
+@ControllerAdvice
+public class UserSettingsControllerAdvice {
+
+    public static final double DEFAULT_HOME_LATITUDE = 60.1699;
+    public static final double DEFAULT_HOME_LONGITUDE = 24.9384;
+    private static final String DEFAULT_COLOR = "#F5DEB3FF";
+    private final UserJdbcService userJdbcService;
+    private final UserSettingsJdbcService userSettingsJdbcService;
+    private final TilesCustomizationProvider tilesCustomizationProvider;
+    private final RawLocationPointJdbcService rawLocationPointJdbcService;
+    private final boolean h3Enabled;
+    private final boolean panoramaxEnabled;
+
+    public UserSettingsControllerAdvice(UserJdbcService userJdbcService,
+                                        UserSettingsJdbcService userSettingsJdbcService,
+                                        TilesCustomizationProvider tilesCustomizationProvider,
+                                        RawLocationPointJdbcService rawLocationPointJdbcService,
+                                        @Value("${reitti.h3.enabled:false}") boolean h3Enabled,
+                                        @Value("${reitti.panoramax.base-url:}") String panoramaxBaseUrl) {
+        this.userJdbcService = userJdbcService;
+        this.userSettingsJdbcService = userSettingsJdbcService;
+        this.tilesCustomizationProvider = tilesCustomizationProvider;
+        this.rawLocationPointJdbcService = rawLocationPointJdbcService;
+        this.h3Enabled = h3Enabled;
+        this.panoramaxEnabled = StringUtils.hasText(panoramaxBaseUrl);
+    }
+    
+    @ModelAttribute("userSettings")
+    public UserSettingsDTO getCurrentUserSettings() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+
+        if (authentication == null || !authentication.isAuthenticated() || "anonymousUser".equals(authentication.getPrincipal())) {
+            // Return default settings for anonymous users
+            return new UserSettingsDTO(Language.EN,
+                                       Locale.ENGLISH.toLanguageTag(),
+                                       Instant.now(),
+                                       Instant.now(),
+                                       UnitSystem.METRIC,
+                                       DEFAULT_HOME_LATITUDE,
+                                       DEFAULT_HOME_LONGITUDE,
+                                       tilesCustomizationProvider.getTilesConfiguration(),
+                                       UserSettingsDTO.UIMode.FULL,
+                                       UserSettingsDTO.PhotoMode.DISABLED,
+                                       TimeDisplayMode.DEFAULT,
+                                       TimeMode.TWENTY_FOUR_HOUR,
+                                       null,
+                                       0,
+                                       null,
+                                       DEFAULT_COLOR,
+                                       h3Enabled,
+                                       panoramaxEnabled
+                                       );
+        }
+
+        String username = authentication.getName();
+        Optional<User> userOptional = userJdbcService.findByUsername(username);
+        UserSettingsDTO.UIMode uiMode = mapUserToUiMode(authentication);
+        UserSettingsDTO.PhotoMode photoMode = mapUserToPhotoMode(authentication);
+        if (userOptional.isPresent()) {
+            User user = userOptional.get();
+            if (user.getUserType() == UserType.LIVE_DATA_ONLY) {
+                uiMode = UserSettingsDTO.UIMode.LIVE_DATA_ONLY;
+            }
+            UserSettings dbSettings = userSettingsJdbcService.getOrCreateDefaultSettings(user.getId());
+            Instant latestData = dbSettings.getLatestData();
+            if (latestData == null) {
+                latestData = rawLocationPointJdbcService.findLatest(user).map(RawLocationPoint::getTimestamp).orElse(null);
+            }
+            Language selectedLanguage = dbSettings.getSelectedLanguage();
+            Instant earliestData = rawLocationPointJdbcService.findEarliest(user).map(RawLocationPoint::getTimestamp).orElse(null);
+            return new UserSettingsDTO(selectedLanguage,
+                                       selectedLanguage.getLocale().toLanguageTag(),
+                                       latestData,
+                                       earliestData,
+                                       dbSettings.getUnitSystem(),
+                                       dbSettings.getHomeLatitude(),
+                                       dbSettings.getHomeLongitude(),
+                                       tilesCustomizationProvider.getTilesConfiguration(),
+                                       uiMode,
+                                       photoMode,
+                                       dbSettings.getTimeDisplayMode(),
+                                       dbSettings.getTimeMode(),
+                                       dbSettings.getTimeZoneOverride(),
+                                       dbSettings.getDayStartTime() != null ? dbSettings.getDayStartTime().get(ChronoField.MINUTE_OF_DAY) : 0,
+                                       dbSettings.getCustomCss() !=null ? "/user-css/" + user.getId() : null,
+                                       dbSettings.getColor(),
+                                       h3Enabled,
+                                       panoramaxEnabled);
+        }
+        // Fallback for authenticated users not found in database
+        return new UserSettingsDTO(Language.EN,
+                                   Locale.ENGLISH.toLanguageTag(),
+                                   Instant.now(),
+                                   Instant.now(),
+                                   UnitSystem.METRIC,
+                                   DEFAULT_HOME_LATITUDE,
+                                   DEFAULT_HOME_LONGITUDE,
+                                   tilesCustomizationProvider.getTilesConfiguration(),
+                                   uiMode,
+                                   photoMode,
+                                   TimeDisplayMode.DEFAULT,
+                                   TimeMode.TWENTY_FOUR_HOUR,
+                                   null,
+                                   0,
+                                   null,
+                                   DEFAULT_COLOR,
+                                   h3Enabled,
+                                   panoramaxEnabled);
+
+    }
+
+
+    private UserSettingsDTO.UIMode mapUserToUiMode(Authentication authentication) {
+        List<String> grantedRoles = authentication.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList();
+        if (grantedRoles.contains("ROLE_ADMIN") || grantedRoles.contains("ROLE_USER") || grantedRoles.contains("ROLE_API_ACCESS")) {
+            return UserSettingsDTO.UIMode.FULL;
+        } else if (grantedRoles.contains("ROLE_MAGIC_LINK_FULL_ACCESS")) {
+            return UserSettingsDTO.UIMode.SHARED_FULL;
+        } else if (grantedRoles.contains("ROLE_MAGIC_LINK_ONLY_LIVE") || grantedRoles.contains("ROLE_MAGIC_LINK_ONLY_LIVE_WITH_PHOTOS") || grantedRoles.contains("ROLE_MAGIC_LINK_ONLY_LAST_LOCATION")) {
+            return UserSettingsDTO.UIMode.SHARED_LIVE_MODE_ONLY;
+        } else if (grantedRoles.contains("ROLE_MAGIC_LINK_MEMORY_VIEW_ONLY") || grantedRoles.contains("ROLE_MAGIC_LINK_MEMORY_EDIT_ACCESS")) {
+            return UserSettingsDTO.UIMode.VIEW_MEMORIES;
+        } else {
+            throw new IllegalStateException("Invalid user authentication mode detected [" + grantedRoles + "]");
+        }
+    }
+
+    private UserSettingsDTO.PhotoMode mapUserToPhotoMode(Authentication authentication) {
+        List<String> grantedRoles = authentication.getAuthorities().stream().map(GrantedAuthority::getAuthority).toList();
+        if (grantedRoles.contains("ROLE_ADMIN") ||
+                grantedRoles.contains("ROLE_USER") ||
+                grantedRoles.contains("MAGIC_LINK_MEMORY_VIEW_ONLY") ||
+                grantedRoles.contains("MAGIC_LINK_MEMORY_EDIT_ACCESS") ||
+                grantedRoles.contains("ROLE_MAGIC_LINK_ONLY_LIVE_WITH_PHOTOS")) {
+            return UserSettingsDTO.PhotoMode.ENABLED;
+        } else {
+            return UserSettingsDTO.PhotoMode.DISABLED;
+        }
+    }
+
+    @ModelAttribute("isLiveDataOnly")
+    public boolean isLiveDataOnly() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated() || "anonymousUser".equals(authentication.getPrincipal())) {
+            return false;
+        }
+        return userJdbcService.findByUsername(authentication.getName())
+                .map(u -> u.getUserType() == UserType.LIVE_DATA_ONLY)
+                .orElse(false);
+    }
+
+}

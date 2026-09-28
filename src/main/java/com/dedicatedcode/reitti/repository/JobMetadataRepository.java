@@ -1,0 +1,260 @@
+package com.dedicatedcode.reitti.repository;
+
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.service.jobs.JobState;
+import com.dedicatedcode.reitti.service.jobs.JobType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+@Repository
+public class JobMetadataRepository {
+    private final JdbcTemplate jdbcTemplate;
+    private final RowMapper<JobMetadata> jobMetadataRowMapper = (rs, ignored) -> {
+        String parentJobIdStr = rs.getString("parent_job_id");
+        return new JobMetadata(
+                UUID.fromString(rs.getString("id")),
+                rs.getString("task_id"),
+                parentJobIdStr != null ? UUID.fromString(parentJobIdStr) : null,
+                rs.getLong("user_id"),
+                JobType.valueOf(rs.getString("type")),
+                rs.getString("friendly_name"),
+                JobState.valueOf(rs.getString("status")),
+                toInstant(rs.getTimestamp("enqueued_at")),
+                toInstant(rs.getTimestamp("scheduled_at")),
+                toInstant(rs.getTimestamp("processing_at")),
+                toInstant(rs.getTimestamp("finished_at")),
+                rs.getString("progress_message"),
+                (Long) rs.getObject("current_progress"),
+                (Long) rs.getObject("max_progress"));
+    };
+
+    public JobMetadataRepository(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    public void insert(UUID jobId, String taskId, JobType jobType, String friendlyName, JobState initialState, Instant enqueuedAt, Instant scheduledAt, UUID parentId) {
+        insert(jobId, null, taskId, jobType, friendlyName, initialState, enqueuedAt, scheduledAt, parentId);
+    }
+    public void insert(UUID jobId, User user, String taskId, JobType jobType, String friendlyName, JobState initialState, Instant enqueuedAt, Instant scheduledAt, UUID parentId) {
+        jdbcTemplate.update(
+            "INSERT INTO job_meta_data (id, user_id, task_id, type, friendly_name, status, enqueued_at, scheduled_at, parent_job_id, created_at, updated_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())",
+            jobId,
+            user != null ? user.getId() : null,
+            taskId,
+            jobType.name(),
+            friendlyName,
+            initialState.name(),
+            toTimestamp(enqueuedAt),
+            toTimestamp(scheduledAt),
+            parentId);
+    }
+
+    private Timestamp toTimestamp(Instant instant) {
+        return instant == null ? null : Timestamp.from(instant);
+    }
+
+    private Instant toInstant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    public void updateProgress(UUID jobId, long current, long max, String message) {
+        this.jdbcTemplate.update("UPDATE job_meta_data SET current_progress = ?, max_progress = ?, progress_message = ? WHERE id = ?", current, max, message, jobId);
+    }
+
+    public void updateState(UUID jobId, JobState newState, Instant stateTimestamp) {
+        String column = switch (newState) {
+            case RUNNING -> "processing_at";
+            case FAILED, COMPLETED -> "finished_at";
+            default -> null;
+        };
+
+        if (column != null) {
+            jdbcTemplate.update(
+                "UPDATE job_meta_data SET status = ?, " + column + " = ?, updated_at = NOW() WHERE id = ?",
+                newState.name(),
+                toTimestamp(stateTimestamp),
+                jobId
+            );
+        } else {
+            jdbcTemplate.update(
+                "UPDATE job_meta_data SET status = ?, updated_at = NOW() WHERE id = ?",
+                newState.name(),
+                jobId
+            );
+        }
+    }
+
+    public Optional<JobState> getState(UUID jobId) {
+        List<String> state = jdbcTemplate.queryForList(
+            "SELECT status FROM job_meta_data WHERE id = ?",
+            String.class,
+            jobId
+        );
+        return state.stream().map(JobState::valueOf).findFirst();
+    }
+
+    @Transactional(isolation = Isolation.READ_UNCOMMITTED)
+    public List<JobMetadata> findByStates(List<JobState> states) {
+        if (states.isEmpty()) {
+            return List.of();
+        }
+        String inClause = String.join(",", Collections.nCopies(states.size(), "?"));
+        String sql = "SELECT id, user_id, task_id, type, friendly_name, status, enqueued_at, scheduled_at, processing_at, finished_at, parent_job_id, current_progress, max_progress, progress_message " +
+                "FROM job_meta_data WHERE status IN (" + inClause + ") ORDER BY created_at DESC";
+        return jdbcTemplate.query(sql, jobMetadataRowMapper, states.stream().map(Enum::name).toArray());
+    }
+
+    @Transactional(isolation = Isolation.READ_UNCOMMITTED)
+    public List<JobMetadata> findByParentJobId(UUID parentId) {
+        String sql = "SELECT id, user_id, task_id, type, friendly_name, status, enqueued_at, scheduled_at, processing_at, finished_at, parent_job_id, current_progress, max_progress, progress_message " +
+                "FROM job_meta_data WHERE parent_job_id = ?";
+        return jdbcTemplate.query(sql, jobMetadataRowMapper, parentId);
+    }
+
+    @Transactional(isolation = Isolation.READ_UNCOMMITTED)
+    public Optional<JobMetadata> findById(UUID jobId) {
+        List<JobMetadata> query = this.jdbcTemplate.query("SELECT * FROM job_meta_data WHERE id = ?", jobMetadataRowMapper, jobId);
+        return query.stream().findFirst();
+    }
+
+    @Transactional(isolation = Isolation.READ_UNCOMMITTED)
+    public void updateParentJobState(UUID parentJobId, JobState newState) {
+        Optional<JobMetadata> parent = findById(parentJobId);
+        if (parent.isEmpty()) return;
+
+        JobState currentState = parent.get().getState();
+
+        if (newState == JobState.RUNNING) {
+            // Only update if currently awaiting
+            if (currentState == JobState.AWAITING) {
+                updateState(parentJobId, JobState.RUNNING, Instant.now());
+            }
+        } else if (newState == JobState.COMPLETED || newState == JobState.FAILED) {
+            // Check all children before completing
+            List<JobMetadata> childJobs = findByParentJobId(parentJobId);
+
+            boolean allComplete = childJobs.stream()
+                    .allMatch(j -> j.getState() == JobState.COMPLETED || j.getState() == JobState.FAILED);
+
+            if (allComplete) {
+                boolean anyFailed = childJobs.stream()
+                        .anyMatch(j -> j.getState() == JobState.FAILED);
+
+                JobState finalState = anyFailed ? JobState.FAILED : JobState.COMPLETED;
+                updateState(parentJobId, finalState, Instant.now());
+            }
+        }
+    }
+
+    public void delete(UUID jobId) {
+        this.jdbcTemplate.update("DELETE FROM job_meta_data WHERE id = ?", jobId);
+    }
+
+    public int deleteOlderThan(Instant cutoff) {
+        String sql = "DELETE FROM job_meta_data WHERE enqueued_at < ? AND status IN ('COMPLETED', 'FAILED', 'CANCELLED')";
+        return jdbcTemplate.update(sql, Timestamp.from(cutoff));
+    }
+
+    public static class JobMetadata {
+        private final UUID id;
+        private final String taskId;
+        private final UUID parentJobId;
+        private final Long userId;
+        private final JobType jobType;
+        private final String friendlyName;
+        private final JobState state;
+        private final Instant enqueuedAt;
+        private final Instant scheduledAt;
+        private final Instant processingAt;
+        private final Instant finishedAt;
+        private final String progressMessage;
+        private final Long currentProgress;
+        private final Long maxProgress;
+
+        public JobMetadata(UUID id, String taskId, UUID parentJobId, Long userId, JobType jobType, String friendlyName, JobState state, Instant enqueuedAt, Instant scheduledAt, Instant processingAt, Instant finishedAt, String progressMessage, Long currentProgress, Long maxProgress) {
+            this.id = id;
+            this.taskId = taskId;
+            this.parentJobId = parentJobId;
+            this.userId = userId;
+            this.jobType = jobType;
+            this.friendlyName = friendlyName;
+            this.state = state;
+            this.enqueuedAt = enqueuedAt;
+            this.scheduledAt = scheduledAt;
+            this.processingAt = processingAt;
+            this.finishedAt = finishedAt;
+            this.progressMessage = progressMessage;
+            this.currentProgress = currentProgress;
+            this.maxProgress = maxProgress;
+        }
+
+        public UUID getId() {
+            return id;
+        }
+
+        public String getTaskId() {
+            return taskId;
+        }
+
+        public UUID getParentJobId() {
+            return parentJobId;
+        }
+
+        public Long getUserId() {
+            return userId;
+        }
+
+        public JobType getJobType() {
+            return jobType;
+        }
+
+        public String getFriendlyName() {
+            return friendlyName;
+        }
+
+        public JobState getState() {
+            return state;
+        }
+
+        public Instant getEnqueuedAt() {
+            return enqueuedAt;
+        }
+
+        public Instant getScheduledAt() {
+            return scheduledAt;
+        }
+
+        public Instant getProcessingAt() {
+            return processingAt;
+        }
+
+        public Instant getFinishedAt() {
+            return finishedAt;
+        }
+
+        public String getProgressMessage() {
+            return progressMessage;
+        }
+
+        public Long getCurrentProgress() {
+            return currentProgress;
+        }
+
+        public Long getMaxProgress() {
+            return maxProgress;
+        }
+    }
+}

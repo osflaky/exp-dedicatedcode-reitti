@@ -1,0 +1,115 @@
+package com.dedicatedcode.reitti.model.processing;
+
+import java.io.Serializable;
+import java.time.Instant;
+
+public class DetectionParameter implements Serializable {
+    private final Long id;
+    private final VisitDetection visitDetection;
+    private final VisitMerging visitMerging;
+    private final LocationDensity locationDensity;
+    private final Instant validSince;
+    private final RecalculationState recalculationState;
+
+    public DetectionParameter(Long id, VisitDetection visitDetection, VisitMerging visitMerging, LocationDensity locationDensity, Instant validSince, RecalculationState recalculationState) {
+        this.id = id;
+        this.visitDetection = visitDetection;
+        this.visitMerging = visitMerging;
+        this.locationDensity = locationDensity;
+        this.validSince = validSince;
+        this.recalculationState = recalculationState;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public VisitDetection getVisitDetection() {
+        return visitDetection;
+    }
+
+    public VisitMerging getVisitMerging() {
+        return visitMerging;
+    }
+
+    public LocationDensity getLocationDensity() {
+        return locationDensity;
+    }
+
+    public Instant getValidSince() {
+        return validSince;
+    }
+
+    public RecalculationState getRecalculationState() {
+        return this.recalculationState;
+    }
+
+    public DetectionParameter withRecalculationState(RecalculationState recalculationState) {
+        return new DetectionParameter(this.id, this.visitDetection, this.visitMerging, this.locationDensity, this.validSince, recalculationState);
+    }
+
+    public DetectionParameter withLocationDensity(LocationDensity locationDensity) {
+        return new DetectionParameter(this.id, this.visitDetection, this.visitMerging, locationDensity, this.validSince, this.recalculationState);
+    }
+
+    public static class VisitDetection implements Serializable {
+        private final long minimumStayTimeInSeconds;
+        private final long maxMergeTimeBetweenSameStayPoints;
+        
+        public VisitDetection(long minimumStayTimeInSeconds, long maxMergeTimeBetweenSameStayPoints) {
+            this.minimumStayTimeInSeconds = minimumStayTimeInSeconds;
+            this.maxMergeTimeBetweenSameStayPoints = maxMergeTimeBetweenSameStayPoints;
+        }
+
+        public long getMinimumStayTimeInSeconds() {
+            return minimumStayTimeInSeconds;
+        }
+
+        public long getMaxMergeTimeBetweenSameStayPoints() {
+            return maxMergeTimeBetweenSameStayPoints;
+        }
+    }
+
+    public static class VisitMerging implements Serializable {
+        private final long searchDurationInHours;
+        private final long maxMergeTimeBetweenSameVisits;
+        private final long placeRadiusMeters;
+
+        public VisitMerging(long searchDurationInHours, long maxMergeTimeBetweenSameVisits,
+                            long placeRadiusMeters) {
+            this.searchDurationInHours = searchDurationInHours;
+            this.maxMergeTimeBetweenSameVisits = maxMergeTimeBetweenSameVisits;
+            this.placeRadiusMeters = placeRadiusMeters;
+        }
+
+        public long getSearchDurationInHours() {
+            return searchDurationInHours;
+        }
+
+        public long getMaxMergeTimeBetweenSameVisits() {
+            return maxMergeTimeBetweenSameVisits;
+        }
+
+        public long getPlaceRadiusMeters() {
+            return placeRadiusMeters;
+        }
+    }
+
+    public static class LocationDensity implements Serializable {
+        private final double maxInterpolationDistanceMeters;
+        private final long maxInterpolationGapMinutes;
+
+        public LocationDensity(double maxInterpolationDistanceMeters, long maxInterpolationGapMinutes) {
+            this.maxInterpolationDistanceMeters = maxInterpolationDistanceMeters;
+            this.maxInterpolationGapMinutes = maxInterpolationGapMinutes;
+        }
+
+        public double getMaxInterpolationDistanceMeters() {
+            return maxInterpolationDistanceMeters;
+        }
+
+        public long getMaxInterpolationGapMinutes() {
+            return maxInterpolationGapMinutes;
+        }
+    }
+}

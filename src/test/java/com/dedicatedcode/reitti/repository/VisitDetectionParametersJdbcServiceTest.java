@@ -1,0 +1,231 @@
+package com.dedicatedcode.reitti.repository;
+
+import com.dedicatedcode.reitti.IntegrationTest;
+import com.dedicatedcode.reitti.TestingService;
+import com.dedicatedcode.reitti.model.processing.DetectionParameter;
+import com.dedicatedcode.reitti.model.processing.RecalculationState;
+import com.dedicatedcode.reitti.model.security.User;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+
+@IntegrationTest
+class VisitDetectionParametersJdbcServiceTest {
+
+    @Autowired
+    private VisitDetectionParametersJdbcService visitDetectionParametersJdbcService;
+
+    @Autowired
+    private TestingService testingService;
+
+    private User testUser;
+
+    @BeforeEach
+    void setUp() {
+        testingService.clearData();
+        testUser = testingService.randomUser();
+    }
+
+    @Test
+    void shouldSaveAndFindConfiguration() {
+        // Given
+        DetectionParameter.VisitDetection visitDetection = new DetectionParameter.VisitDetection(
+                300L, 600L
+        );
+        DetectionParameter.VisitMerging visitMerging = new DetectionParameter.VisitMerging(
+                24L, 1800L, 50L
+        );
+        DetectionParameter.LocationDensity locationDensity = new DetectionParameter.LocationDensity(
+                50, 720
+        );
+        DetectionParameter detectionParameter = new DetectionParameter(
+                null, visitDetection, visitMerging, locationDensity, Instant.now(), RecalculationState.DONE
+        );
+
+        // When
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, detectionParameter);
+
+        // Then
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(detectionParameters).hasSize(2);
+
+        DetectionParameter savedConfig = detectionParameters.getFirst();
+        assertThat(savedConfig.getId()).isNotNull();
+        assertThat(savedConfig.getVisitDetection().getMinimumStayTimeInSeconds()).isEqualTo(300L);
+        assertThat(savedConfig.getVisitDetection().getMaxMergeTimeBetweenSameStayPoints()).isEqualTo(600L);
+        assertThat(savedConfig.getVisitMerging().getSearchDurationInHours()).isEqualTo(24L);
+        assertThat(savedConfig.getVisitMerging().getMaxMergeTimeBetweenSameVisits()).isEqualTo(1800L);
+        assertThat(savedConfig.getVisitMerging().getPlaceRadiusMeters()).isEqualTo(50L);
+        assertThat(savedConfig.getValidSince()).isNotNull();
+    }
+
+    @Test
+    void shouldNotSaveConfigurationWithNullValidSinceWhenOneAlreadyExists() {
+        // Verify first configuration was saved
+        List<DetectionParameter> afterFirst = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(afterFirst).hasSize(1);
+        assertThat(afterFirst.getFirst().getValidSince()).isNull();
+
+        // When - Try to save another configuration with null validSince
+        DetectionParameter.VisitDetection secondVisitDetection = new DetectionParameter.VisitDetection(600L, 1200L);
+        DetectionParameter.VisitMerging secondVisitMerging = new DetectionParameter.VisitMerging(
+                12L, 900L, 25L
+        );
+        DetectionParameter.LocationDensity secondLocationDensity = new DetectionParameter.LocationDensity(
+                50, 720
+        );
+        DetectionParameter secondDetectionParameter = new DetectionParameter(
+                null, secondVisitDetection, secondVisitMerging, secondLocationDensity, null, RecalculationState.DONE
+        );
+
+        assertThatExceptionOfType(DuplicateKeyException.class)
+                .isThrownBy(() -> visitDetectionParametersJdbcService.saveConfiguration(testUser, secondDetectionParameter));
+
+        // Then - Should still have only one configuration (the database should discard the second one)
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(detectionParameters).hasSize(1);
+        assertThat(detectionParameters.getFirst().getValidSince()).isNull();
+        // The values should still be from the first configuration, not the second
+        assertThat(detectionParameters.getFirst().getVisitDetection().getMinimumStayTimeInSeconds()).isEqualTo(300L);
+        assertThat(detectionParameters.getFirst().getVisitDetection().getMaxMergeTimeBetweenSameStayPoints()).isEqualTo(300L);
+    }
+
+    @Test
+    void shouldUpdateConfiguration() {
+        // Given - save initial configuration
+        DetectionParameter.VisitDetection initialVisitDetection = new DetectionParameter.VisitDetection(
+                300L, 600L
+        );
+        DetectionParameter.VisitMerging initialVisitMerging = new DetectionParameter.VisitMerging(
+                24L, 1800L, 50L
+        );
+        DetectionParameter.LocationDensity locationDensity = new DetectionParameter.LocationDensity(
+                50, 720
+        );
+        DetectionParameter initialConfig = new DetectionParameter(
+                null, initialVisitDetection, initialVisitMerging, locationDensity, Instant.now(), RecalculationState.DONE
+        );
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, initialConfig);
+
+        List<DetectionParameter> savedConfigs = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        DetectionParameter savedConfig = savedConfigs.getFirst();
+
+        // When - update the configuration
+        DetectionParameter.VisitDetection updatedVisitDetection = new DetectionParameter.VisitDetection(
+                450L, 900L
+        );
+        DetectionParameter.VisitMerging updatedVisitMerging = new DetectionParameter.VisitMerging(
+                48L, 3600L, 75L
+        );
+        DetectionParameter.LocationDensity updatedLocationDensity = new DetectionParameter.LocationDensity(
+                500, 7200
+        );
+        Instant newValidSince = Instant.now().plusSeconds(3600).truncatedTo(ChronoUnit.MILLIS);
+        DetectionParameter updatedConfig = new DetectionParameter(
+                savedConfig.getId(), updatedVisitDetection, updatedVisitMerging, updatedLocationDensity, newValidSince, RecalculationState.DONE
+        );
+        visitDetectionParametersJdbcService.updateConfiguration(updatedConfig);
+
+        // Then
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(detectionParameters).hasSize(2);
+
+        DetectionParameter result = detectionParameters.getFirst();
+        assertThat(result.getId()).isEqualTo(savedConfig.getId());
+        assertThat(result.getVisitDetection().getMinimumStayTimeInSeconds()).isEqualTo(450L);
+        assertThat(result.getVisitDetection().getMaxMergeTimeBetweenSameStayPoints()).isEqualTo(900L);
+        assertThat(result.getVisitMerging().getSearchDurationInHours()).isEqualTo(48L);
+        assertThat(result.getVisitMerging().getMaxMergeTimeBetweenSameVisits()).isEqualTo(3600L);
+        assertThat(result.getVisitMerging().getPlaceRadiusMeters()).isEqualTo(75L);
+        assertThat(result.getValidSince()).isEqualTo(newValidSince);
+        assertThat(result.getLocationDensity().getMaxInterpolationDistanceMeters()).isEqualTo(500);
+        assertThat(result.getLocationDensity().getMaxInterpolationGapMinutes()).isEqualTo(7200);
+    }
+
+    @Test
+    void shouldDeleteConfiguration() {
+        // Given - save configuration with validSince
+        DetectionParameter.VisitDetection visitDetection = new DetectionParameter.VisitDetection(
+                300L, 600L
+        );
+        DetectionParameter.VisitMerging visitMerging = new DetectionParameter.VisitMerging(
+                24L, 1800L, 50L
+        );
+        DetectionParameter.LocationDensity locationDensity = new DetectionParameter.LocationDensity(
+                50, 720
+        );
+        DetectionParameter detectionParameter = new DetectionParameter(
+                null, visitDetection, visitMerging, locationDensity, Instant.now(), RecalculationState.DONE
+        );
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, detectionParameter);
+
+        List<DetectionParameter> savedConfigs = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        Long configId = savedConfigs.getFirst().getId();
+
+        // When
+        visitDetectionParametersJdbcService.delete(configId);
+
+        // Then
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(detectionParameters.size()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldNotDeleteConfigurationWithNullValidSince() {
+        List<DetectionParameter> savedConfigs = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        Long configId = savedConfigs.getFirst().getId();
+
+        // When
+        visitDetectionParametersJdbcService.delete(configId);
+
+        // Then - configuration should still exist because validSince is null
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+        assertThat(detectionParameters).hasSize(1);
+        assertThat(detectionParameters.getFirst().getValidSince()).isNull();
+    }
+
+    @Test
+    void shouldFindMultipleConfigurationsOrderedByValidSince() {
+        // Given
+        Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Instant earlier = now.minusSeconds(3600);
+        Instant later = now.plusSeconds(3600);
+
+        DetectionParameter.VisitDetection visitDetection = new DetectionParameter.VisitDetection(
+                300L, 600L
+        );
+        DetectionParameter.VisitMerging visitMerging = new DetectionParameter.VisitMerging(
+                24L, 1800L, 50L
+        );
+        DetectionParameter.LocationDensity locationDensity = new DetectionParameter.LocationDensity(
+                50, 720
+        );
+
+        // Save configurations in different order
+        DetectionParameter config1 = new DetectionParameter(null, visitDetection, visitMerging, locationDensity, now, RecalculationState.DONE);
+        DetectionParameter config2 = new DetectionParameter(null, visitDetection, visitMerging, locationDensity, later, RecalculationState.DONE);
+        DetectionParameter config3 = new DetectionParameter(null, visitDetection, visitMerging, locationDensity, earlier, RecalculationState.DONE);
+
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, config1);
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, config2);
+        visitDetectionParametersJdbcService.saveConfiguration(testUser, config3);
+
+        // When
+        List<DetectionParameter> detectionParameters = visitDetectionParametersJdbcService.findAllConfigurationsForUser(testUser);
+
+        // Then - should be ordered by validSince DESC NULLS LAST
+        assertThat(detectionParameters).hasSize(4);
+        assertThat(detectionParameters.get(0).getValidSince()).isEqualTo(later);
+        assertThat(detectionParameters.get(1).getValidSince()).isEqualTo(now);
+        assertThat(detectionParameters.get(2).getValidSince()).isEqualTo(earlier);
+        assertThat(detectionParameters.get(3).getValidSince()).isNull();
+    }
+}

@@ -1,0 +1,209 @@
+package com.dedicatedcode.reitti.repository;
+
+import com.dedicatedcode.reitti.model.Role;
+import com.dedicatedcode.reitti.model.UserType;
+import com.dedicatedcode.reitti.model.devices.Device;
+import com.dedicatedcode.reitti.model.security.ApiToken;
+import com.dedicatedcode.reitti.model.security.ApiTokenUsage;
+import com.dedicatedcode.reitti.model.security.User;
+import org.springframework.dao.EmptyResultDataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.List;
+import java.util.Optional;
+
+@Service
+public class ApiTokenJdbcService {
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public ApiTokenJdbcService(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    public Optional<ApiToken> findByToken(String token) {
+        String sql = """
+            SELECT at.id, at.token, at.name, at.device_id, at.created_at, at.last_used_at,
+                   u.id as user_id, u.username, u.password, u.display_name, u.profile_url, u.external_id, u.role, u.user_type, u.version as user_version,
+                   d.id as device_id, d.name as device_name, d.default_device as default_device, d.enabled as device_enabled, d.color as device_color, d.show_on_map as device_show_on_map, d.show_avatar_on_map as device_show_avatar_on_map, d.version as device_version, d.created_at as device_created_at, d.updated_at as device_updated_at, d.version as device_version
+            FROM api_tokens at
+            JOIN users u ON at.user_id = u.id
+            LEFT JOIN devices d ON at.device_id = d.id
+            WHERE at.token = ?
+            """;
+        try {
+            ApiToken apiToken = jdbcTemplate.queryForObject(sql, this::mapRowToApiToken, token);
+            return Optional.ofNullable(apiToken);
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public List<ApiToken> findByUser(User user) {
+        String sql = """
+            SELECT at.id, at.token, at.name, at.device_id, at.created_at, at.last_used_at,
+                   u.id as user_id, u.username, u.password, u.display_name, u.profile_url, u.external_id, u.role, u.user_type, u.version as user_version,
+                   d.id as device_id, d.name as device_name, d.default_device as default_device, d.enabled as device_enabled, d.color as device_color, d.show_on_map as device_show_on_map, d.show_avatar_on_map as device_show_avatar_on_map, d.version as device_version, d.created_at as device_created_at, d.updated_at as device_updated_at, d.version as device_version
+            FROM api_tokens at
+            JOIN users u ON at.user_id = u.id
+            LEFT JOIN devices d ON at.device_id = d.id
+            WHERE at.user_id = ?
+            ORDER BY at.created_at DESC
+            """;
+        return jdbcTemplate.query(sql, this::mapRowToApiToken, user.getId());
+    }
+
+    public Optional<ApiToken> findById(Long id) {
+        String sql = """
+            SELECT at.id, at.token, at.name, at.device_id, at.created_at, at.last_used_at,
+                   u.id as user_id, u.username, u.password, u.display_name, u.profile_url, u.external_id, u.role, u.user_type, u.version as user_version,
+                   d.id as device_id, d.name as device_name, d.default_device as default_device, d.enabled as device_enabled, d.color as device_color, d.show_on_map as device_show_on_map, d.show_avatar_on_map as device_show_avatar_on_map, d.version as device_version, d.created_at as device_created_at, d.updated_at as device_updated_at, d.version as device_version
+            FROM api_tokens at
+            JOIN users u ON at.user_id = u.id
+            LEFT JOIN devices d ON at.device_id = d.id
+            WHERE at.id = ?
+            """;
+        try {
+            ApiToken apiToken = jdbcTemplate.queryForObject(sql, this::mapRowToApiToken, id);
+            return Optional.ofNullable(apiToken);
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
+    public ApiToken save(ApiToken apiToken) {
+        if (apiToken.getId() == null) {
+            return insert(apiToken);
+        } else {
+            return update(apiToken);
+        }
+    }
+
+    private ApiToken insert(ApiToken apiToken) {
+        String sql = "INSERT INTO api_tokens (token, user_id, device_id, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id";
+        
+        Long id = jdbcTemplate.queryForObject(sql, Long.class,
+            apiToken.getToken(),
+            apiToken.getUser().getId(),
+            apiToken.getDevice() != null ? apiToken.getDevice().id() : null,
+            apiToken.getName(),
+            Timestamp.from(apiToken.getCreatedAt()),
+            apiToken.getLastUsedAt() != null ? Timestamp.from(apiToken.getLastUsedAt()) : null
+        );
+        
+        return new ApiToken(id, apiToken.getToken(), apiToken.getUser(), apiToken.getDevice(), apiToken.getName(),
+                           apiToken.getCreatedAt(), apiToken.getLastUsedAt());
+    }
+
+    private ApiToken update(ApiToken apiToken) {
+        String sql = "UPDATE api_tokens SET token = ?, name = ?, last_used_at = ?, device_id = ? WHERE id = ?";
+        
+        int rowsAffected = jdbcTemplate.update(sql,
+            apiToken.getToken(),
+            apiToken.getName(),
+            apiToken.getLastUsedAt() != null ? Timestamp.from(apiToken.getLastUsedAt()) : null,
+            apiToken.getDevice() != null ? apiToken.getDevice().id() : null,
+            apiToken.getId()
+        );
+        
+        if (rowsAffected == 0) {
+            throw new EmptyResultDataAccessException("No ApiToken found with id: " + apiToken.getId(), 1);
+        }
+        
+        return apiToken;
+    }
+
+    public void deleteById(Long id) {
+        String sql = "DELETE FROM api_tokens WHERE id = ?";
+        int rowsAffected = jdbcTemplate.update(sql, id);
+        if (rowsAffected == 0) {
+            throw new EmptyResultDataAccessException("No ApiToken found with id: " + id, 1);
+        }
+    }
+
+    public void delete(ApiToken apiToken) {
+        deleteById(apiToken.getId());
+    }
+
+    @Transactional(readOnly = true)
+    public long count() {
+        String sql = "SELECT COUNT(*) FROM api_tokens";
+        Long count = jdbcTemplate.queryForObject(sql, Long.class);
+        return count != null ? count : 0L;
+    }
+
+    private ApiToken mapRowToApiToken(ResultSet rs, int rowNum) throws SQLException {
+        User user = new User(
+            rs.getLong("user_id"),
+            rs.getString("username"),
+            rs.getString("password"),
+            rs.getString("display_name"),
+            rs.getString("profile_url"),
+            rs.getString("external_id"),
+            Role.valueOf(rs.getString("role")),
+            UserType.valueOf(rs.getString("user_type")),
+            rs.getLong("user_version")
+        );
+
+
+        Device device = null;
+        if (rs.getObject("device_id") != null) {
+            device = new Device(
+                    rs.getLong("device_id"),
+                    rs.getString("device_name"),
+                    rs.getBoolean("device_enabled"),
+                    rs.getBoolean("device_show_on_map"),
+                    rs.getBoolean("device_show_avatar_on_map"),
+                    rs.getString("device_color"),
+                    rs.getBoolean("default_device"),
+                    rs.getTimestamp("device_created_at").toInstant(),
+                    rs.getTimestamp("device_updated_at").toInstant(),
+                    rs.getLong("device_version"));
+        }
+
+        return new ApiToken(
+            rs.getLong("id"),
+            rs.getString("token"),
+            user,
+            device,
+            rs.getString("name"),
+            rs.getTimestamp("created_at").toInstant(),
+            rs.getTimestamp("last_used_at") != null ? rs.getTimestamp("last_used_at").toInstant() : null
+        );
+    }
+
+    private ApiTokenUsage mapRowToApiUsage(ResultSet rs, int rowNum) throws SQLException {
+        return new ApiTokenUsage(rs.getString("token"),
+                rs.getString("name"),
+                rs.getString("device_name"),
+                rs.getTimestamp("at").toInstant(),
+                rs.getString("endpoint"),
+                rs.getString("ip"));
+    }
+
+    public List<ApiTokenUsage> getUsages(User user, int maxRows) {
+        return this.jdbcTemplate.query("""
+                                        SELECT t.token, t.name,  t.device_id, au.at, au.endpoint, au.ip, d.name as device_name
+                                        FROM api_token_usages au
+                                                 LEFT JOIN api_tokens t ON t.id = au.token_id
+                                                 LEFT JOIN devices d ON t.device_id = d.id
+                                        WHERE t.user_id = ?
+                                        ORDER BY au.at DESC LIMIT ?;
+                                        """,
+                                       this::mapRowToApiUsage, user.getId(), maxRows);
+    }
+
+    public void trackUsage(String token, String requestPath, String remoteIp) {
+        this.jdbcTemplate.update("INSERT INTO api_token_usages(token_id, at, endpoint, ip) SELECT id, now() at time zone 'utc', ?, ? FROM api_tokens WHERE token = ?",
+                requestPath, remoteIp, token);
+    }
+
+    public void deleteForUser(User user) {
+        this.jdbcTemplate.update("DELETE FROM api_tokens WHERE user_id = ?", user.getId());
+    }
+}

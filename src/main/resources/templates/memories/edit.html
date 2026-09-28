@@ -1,0 +1,20 @@
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memories - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo.svg}">
+    <link rel="stylesheet" th:href="@{/css/main.css}" href="../../static/css/main.css">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}" href="../../static/css/lineicons.css">
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+</head>
+<body class="memories-page">
+<div class="settings-container">
+    <div class="settings-content-area">
+        <div id="edit-fragment" class="memory-header" th:fragment="edit-memory">
+            <div th:replace="~{memories/new :: memory-form}"></div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

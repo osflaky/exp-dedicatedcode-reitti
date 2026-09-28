@@ -1,0 +1,106 @@
+package com.dedicatedcode.reitti.service.jobs;
+
+import com.dedicatedcode.reitti.model.geo.RawLocationPoint;
+import com.dedicatedcode.reitti.model.geo.TransportModeSegment;
+import com.dedicatedcode.reitti.model.security.User;
+import com.dedicatedcode.reitti.repository.JobMetadataRepository;
+import com.dedicatedcode.reitti.repository.RawLocationPointJdbcService;
+import com.dedicatedcode.reitti.repository.TripJdbcService;
+import com.dedicatedcode.reitti.repository.UserJdbcService;
+import com.dedicatedcode.reitti.service.JobContext;
+import com.dedicatedcode.reitti.service.processing.TransportModeService;
+import com.dedicatedcode.reitti.service.processing.UserProcessingLock;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.quartz.DisallowConcurrentExecution;
+import org.quartz.Job;
+import org.quartz.JobExecutionContext;
+import org.quartz.JobExecutionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+
+@Service
+@DisallowConcurrentExecution
+public class TransportModeRecalculationTask implements Job {
+    private static final Logger log = LoggerFactory.getLogger(TransportModeRecalculationTask.class);
+    private final TripJdbcService tripJdbcService;
+    private final RawLocationPointJdbcService rawLocationPointJdbcService;
+    private final UserJdbcService userJdbcService;
+    private final TransportModeService transportModeService;
+    private final JobMetadataRepository metadataRepository;
+    private final UserProcessingLock userProcessingLock;
+
+    public TransportModeRecalculationTask(TripJdbcService tripJdbcService, RawLocationPointJdbcService rawLocationPointJdbcService, UserJdbcService userJdbcService, TransportModeService transportModeService, JobMetadataRepository metadataRepository, UserProcessingLock userProcessingLock) {
+        this.tripJdbcService = tripJdbcService;
+        this.rawLocationPointJdbcService = rawLocationPointJdbcService;
+        this.userJdbcService = userJdbcService;
+        this.transportModeService = transportModeService;
+        this.metadataRepository = metadataRepository;
+        this.userProcessingLock = userProcessingLock;
+    }
+
+    @Override
+    public void execute(JobExecutionContext context) throws JobExecutionException {
+        execute(TaskData.fromJson((String) context.getMergedJobDataMap().get("data")));
+    }
+
+    public void execute(TaskData taskData) {
+        User user = userJdbcService.findById(taskData.userId).orElseThrow(() -> new IllegalArgumentException("User with id [" + taskData.userId + "] not found"));
+        long allTripsAmountForUser = this.tripJdbcService.count(user);
+        metadataRepository.updateProgress(taskData.getJobId(), 0, allTripsAmountForUser, "Updating trips");
+        AtomicLong currentTrip = new AtomicLong();
+        userProcessingLock.locked(user, () ->
+                tripJdbcService.findByUser(user).forEach(trip -> {
+                    Instant startTime = trip.getStartTime();
+                    Instant endTime = trip.getEndTime();
+                    List<RawLocationPoint> tripPoints = this.rawLocationPointJdbcService.findByUserAndTimestampBetweenOrderByTimestampAsc(user, startTime, endTime.plus(1, ChronoUnit.MILLIS));
+                    List<TransportModeSegment> segments = this.transportModeService.segmentTrip(user, tripPoints, startTime, endTime);
+                    if (!segments.equals(trip.getSegments())) {
+                        log.trace("Reclassified trip {} from {} to {} to segments {}", trip.getId(), trip.getSegments(), endTime, segments);
+                        trip = trip.withSegments(segments);
+                        this.tripJdbcService.update(trip);
+                    }
+                    if (currentTrip.getAndIncrement() % 100 == 0) {
+                        metadataRepository.updateProgress(taskData.getJobId(), currentTrip.get(), allTripsAmountForUser, "Updating trips");
+                    }
+                }));
+    }
+
+    public static class TaskData extends JobContext<TaskData> {
+
+        private final Long userId;
+
+        public TaskData(Long userId) {
+            this(userId, null, null);
+        }
+
+        @JsonCreator
+        private TaskData(@JsonProperty("userId") Long userId,
+                         @JsonProperty("jobId") UUID jobId,
+                         @JsonProperty("parentJobId") UUID parentJobId) {
+            super(jobId, parentJobId);
+            this.userId = userId;
+        }
+
+        public static TaskData fromJson(String json) {
+            return JobContext.fromJson(json, TaskData.class);
+        }
+
+        @Override
+        public TaskData withJobId(UUID jobId) {
+            return new TaskData(userId, jobId, parentJobId);
+        }
+
+        @Override
+        public TaskData withParentJobId(UUID parentJobId) {
+            return new TaskData(userId, jobId, parentJobId);
+        }
+    }
+}

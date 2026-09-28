@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<body>
+
+
+<!-- Users List Fragment -->
+<div th:fragment="users-list">
+    <div th:if="${successMessage}" class="alert alert-success" style="display: block;">
+        <span th:text="${successMessage}">User created successfully</span>
+    </div>
+    <div th:if="${errorMessage}" class="alert alert-danger" style="display: block;">
+        <span th:text="${errorMessage}">Error message</span>
+    </div>
+    <div th:if="${requireRelogin}" class="alert alert-warning" style="display: block;">
+        <span>Your username has changed to <strong th:text="${newUsername}"></strong>. You will need to log out and log in again with your new username.</span>
+    </div>
+    <h2 th:text="#{users.title}">Significant Places</h2>
+
+    <div class="settings-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h3 th:text="#{users.existing}">Existing Users</h3>
+            <button th:if="${isAdmin && addUserAvailable}" class="btn"
+                    th:hx-get="@{/settings/user-form}"
+                    hx-target="#user-management"
+                    hx-swap="innerHTML"
+                    th:text="#{users.add.title}">Add New User</button>
+        </div>
+        
+        <div th:if="${users.isEmpty()}">
+            <p th:text="#{users.no.users}">No users found.</p>
+        </div>
+
+        <table th:if="${!users.isEmpty()}">
+            <thead>
+            <tr>
+                <th th:text="#{users.table.username}">Username</th>
+                <th th:text="#{users.table.display.name}">Display Name</th>
+                <th th:text="#{users.table.role}">Role</th>
+                <th th:text="#{users.table.actions}">Actions</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr th:each="user : ${users}" th:attr="data-user-id=${user.id}" class="user-row">
+                <td th:text="${user.username}" th:attr="data-username=${user.username}"></td>
+                <td th:text="${user.displayName}" th:attr="data-display-name=${user.displayName}"></td>
+                <td th:text="${user.role}" th:attr="data-role=${user.role}"></td>
+                <td>
+                    <button th:if="${isAdmin || user.username == currentUsername}" class="btn"
+                            th:attr="hx-get=@{/settings/user-form(userId=${user.id}, username=${user.username}, displayName=${user.displayName}, role=${user.role})}"
+                            hx-target="#user-management"
+                            hx-swap="innerHTML"
+                            th:text="#{form.edit}">Edit
+                    </button>
+                    <button th:if="${isAdmin && user.username != currentUsername}"
+                            class="btn btn-danger"
+                            th:attr="hx-post=@{/settings/users/{id}/delete(id=${user.id})}, hx-confirm=#{users.delete.confirm}"
+                            hx-target="#user-management"
+                            hx-swap="innerHTML"
+                            th:text="#{form.delete}">Delete
+                    </button>
+                </td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- User Form Page Fragment -->
+<div th:fragment="user-form-page">
+    <form hx-target="#user-management" hx-swap="innerHTML" class="user-form" autocomplete="off" 
+          th:attr="hx-post=@{${userId != null ? '/settings/users/update' : '/settings/users'}}"
+          enctype="multipart/form-data">
+        <input type="hidden" name="userId" th:value="${userId}">
+        <h3 th:text="${userId != null ? #messages.msg('users.update.title') : #messages.msg('users.add.title')}">Add New User</h3>
+        
+        <!-- OIDC managed user notice -->
+        <div th:if="${externallyManaged}" class="alert alert-info" style="display: block;">
+            <span th:text="#{users.oidc.managed.message}">This user is managed by an external OIDC provider.</span>
+            <a th:if="${externalProfile}" th:href="${externalProfile}" target="_blank" th:text="#{users.oidc.view.profile}">View external profile</a>
+        </div>
+        
+        <div class="form-group">
+            <label for="username" th:text="#{users.username.label}">Username</label>
+            <input type="text" id="username" name="username" required th:placeholder="#{users.username.placeholder}" autocomplete="off" 
+                   th:value="${username}" th:disabled="${externallyManaged}">
+        </div>
+        <div class="form-group">
+            <label for="displayName" th:text="#{users.display.name.label}">Display Name</label>
+            <input type="text" id="displayName" name="displayName" required th:placeholder="#{users.display.name.placeholder}" autocomplete="off"
+                   th:value="${displayName}" th:disabled="${externallyManaged}">
+        </div>
+        <div class="form-group" th:unless="${externallyManaged && localLoginDisabled}">
+            <label for="password" th:text="#{users.password.label}">Password</label>
+            <input type="password" id="password" name="password" th:required="${userId == null}" th:placeholder="#{users.password.placeholder}" autocomplete="new-password">
+            <small th:if="${userId != null && !externallyManaged}" th:text="#{users.password.keep.current}">Leave empty to keep current password</small>
+        </div>
+        <div th:if="${isAdmin}" class="form-group">
+            <label for="role" th:text="#{users.role.label}">Role</label>
+            <div class="select">
+                <select id="role" name="role" required>
+                    <option value="USER" th:selected="${selectedRole == 'USER' || selectedRole == null}" th:text="#{users.role.user}">User</option>
+                    <option value="ADMIN" th:selected="${selectedRole == 'ADMIN'}" th:text="#{users.role.admin}">Admin</option>
+                </select>
+            </div>
+        </div>
+        <div th:if="${isAdmin}" class="form-group">
+            <label for="userType" th:text="#{users.type.label}">User Type</label>
+            <div class="select">
+                <select id="userType" name="userType" th:attr="data-original=${selectedUserType.name()}">
+                    <option value="NORMAL" th:selected="${selectedUserType.name() == 'NORMAL'}" th:text="#{users.type.normal}">Normal</option>
+                    <option value="LIVE_DATA_ONLY" th:selected="${selectedUserType.name() == 'LIVE_DATA_ONLY'}" th:text="#{users.type.live_data_only}">Live Data Only</option>
+                </select>
+            </div>
+        </div>
+        <input th:unless="${isAdmin}" type="hidden" name="role" th:value="${selectedRole ?: 'USER'}">
+        <div class="separator"></div>
+        <div class="form-group">
+            <h3 th:text="#{users.avatar.label}">Profile Picture</h3>
+            
+            <!-- Current avatar display -->
+            <div th:if="${userId != null && hasAvatar}" class="current-avatar">
+                <img th:src="@{/avatars/{userId}(userId=${userId}, ts=${#dates.createNow().time})}" 
+                     alt="Current avatar" 
+                     class="avatar">
+            </div>
+            
+            <!-- Avatar management for non-OIDC users -->
+            <div th:unless="${externallyManaged}">
+                <!-- Default avatars selection -->
+                <div class="default-avatars-section">
+                    <h4 th:text="#{users.avatar.default.title}">Choose a default avatar:</h4>
+                    <div class="default-avatars-grid">
+                        <label th:each="defaultAvatar : ${defaultAvatars}" class="default-avatar-option">
+                            <input type="radio" name="defaultAvatar" th:value="${defaultAvatar}" style="display: none;">
+                            <img th:src="@{/img/avatars/default/{avatar}(avatar=${defaultAvatar})}"
+                                 th:alt="${defaultAvatar}" 
+                                 class="avatar">
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="separator">
+                    <span th:text="#{users.avatar.or}">OR</span>
+                </div>
+                
+                <!-- Custom file upload -->
+                <div class="custom-avatar-section">
+                    <h4 th:text="#{users.avatar.custom.title}">Upload a custom image:</h4>
+                    <div class="avatar-input-row">
+                        <input type="file" id="avatar" name="avatar" accept="image/jpeg,image/png,image/gif,image/webp">
+                        <button type="button" 
+                                th:if="${userId != null && hasAvatar}"
+                                class="btn btn-danger avatar-remove-btn"
+                                onclick="removeCurrentAvatar()"
+                                th:text="#{users.avatar.delete}">Remove current avatar</button>
+                    </div>
+                    <small th:text="#{users.avatar.requirements}">Max 2MB. JPEG, PNG, GIF, or WebP format.</small>
+                </div>
+            </div>
+            
+            <!-- Message for OIDC users -->
+            <div th:if="${externallyManaged}" class="alert alert-info" style="display: block;">
+                <span th:text="#{users.avatar.oidc.managed}">Avatar is managed by your OIDC provider and will be updated automatically.</span>
+            </div>
+            
+            <input type="hidden" id="removeAvatarFlag" name="removeAvatar" value="false">
+        </div>
+        <div class="separator"></div>
+        
+        <div class="form-group">
+            <h3 th:text="#{users.custom.css.label}">Custom CSS</h3>
+            <p class="form-description" th:text="#{users.custom.css.description}">Upload a custom CSS file to personalize your interface. This will override default styles.</p>
+            
+            <!-- Current CSS file display -->
+            <div th:if="${userId != null && hasCustomCss}" class="current-css">
+                <div class="css-file-info">
+                    <span class="css-file-icon">📄</span>
+                    <span th:text="#{users.custom.css.current}">Custom CSS file uploaded</span>
+                    <button type="button" 
+                            class="btn btn-danger css-remove-btn"
+                            onclick="removeCurrentCss()"
+                            th:text="#{users.custom.css.delete}">Remove CSS</button>
+                </div>
+            </div>
+            
+            <!-- CSS file upload -->
+            <div class="css-upload-section">
+                <div class="css-input-row">
+                    <input type="file" id="customCss" name="customCss" accept=".css,text/css">
+                </div>
+                <small th:text="#{users.custom.css.requirements}">Max 1MB. CSS files only (.css extension required).</small>
+            </div>
+            
+            <div th:if="${cssError}" class="alert alert-danger" style="display: block;">
+                <span th:text="${cssError}">CSS error message</span>
+            </div>
+            
+            <input type="hidden" id="removeCssFlag" name="removeCss" value="false">
+        </div>
+        <div class="separator"></div>
+
+        <div class="form-group">
+            <h3 th:text="#{language.title}">Preferred Language</h3>
+            <div class="language-selection">
+                <div class="language-buttons">
+                    <label class="btn language-btn" th:each="language : ${availableLanguages}">
+                        <input type="radio" name="preferred_language" th:value="${language}" value="en" th:checked="${selectedLanguage == language}" style="display: none;">
+                        <span class="language-flag" th:text="${language.symbol}">🇺🇸</span>
+                        <span th:text="#{${language.messageKey}}" class="language-name">English</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div class="separator"></div>
+
+        <div class="form-group">
+            <h3 th:text="#{units.title}">Unit System</h3>
+            <div class="language-selection">
+                <div class="language-buttons">
+                    <label class="btn language-btn">
+                        <input type="radio" name="unit_system" value="METRIC" th:checked="${selectedUnitSystem == 'METRIC' || selectedUnitSystem == null}" style="display: none;">
+                        <span th:text="#{units.metric}" class="language-name">Metric</span>
+                        <small th:text="#{units.metric.description}" class="unit-description">km, m, °C</small>
+                    </label>
+
+                    <label class="btn language-btn">
+                        <input type="radio" name="unit_system" value="IMPERIAL" th:checked="${selectedUnitSystem == 'IMPERIAL'}" style="display: none;">
+                        <span th:text="#{units.imperial}" class="language-name">Imperial</span>
+                        <span th:text="#{units.imperial.description}" class="unit-description">mi, ft, °F</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        <div class="separator"></div>
+        <div class="form-group">
+            <h3 th:text="#{time.title}">Time</h3>
+            
+            <div class="form-group">
+                <label for="timeDisplayMode" th:text="#{time.display.mode.label}">Time Display Mode</label>
+                <div class="select">
+                    <select id="timeDisplayMode" name="time_display_mode">
+                        <option value="DEFAULT" th:selected="${timeDisplayMode == 'DEFAULT' || timeDisplayMode == null}" th:text="#{time.display.mode.default}">Default</option>
+                        <option value="GEO_LOCAL" th:selected="${timeDisplayMode == 'GEO_LOCAL'}" th:text="#{time.display.mode.geo.local}">Geo Local</option>
+                    </select>
+                </div>
+                <p class="form-description" th:text="#{time.display.mode.description}">Choose how times are displayed throughout the application.</p>
+                <ul class="form-description">
+                    <li th:text="#{time.display.mode.default.description}">Default: All times are displayed in your timezone (from browser or timezone override below)</li>
+                    <li th:text="#{time.display.mode.geo.local.description}">Geo Local: All times are displayed in the timezone where the location is</li>
+                </ul>
+            </div>
+            <div class="form-group">
+                <label for="timeMode" th:text="#{time.format.mode.label}">Time Display Mode</label>
+                <div class="select">
+                    <select id="timeMode" name="time_mode">
+                        <option value="TWENTY_FOUR_HOUR" th:selected="${timeMode == 'TWENTY_FOUR_HOUR' || timeMode == null}" th:text="#{time.format.mode.TWENTY_FOUR_HOUR}">24 Hours</option>
+                        <option value="TWELVE_HOUR" th:selected="${timeMode == 'TWELVE_HOUR'}" th:text="#{time.format.mode.TWELVE_HOUR}">12 Hours</option>
+                    </select>
+                </div>
+                <p class="form-description" th:text="#{time.format.mode.description}">Choose how times are formatted throughout the application.</p>
+            </div>
+            
+            <div class="form-group">
+                <label for="timezoneOverride" th:text="#{time.timezone.override.label}">Timezone Override</label>
+                <div class="select">
+                    <select id="timezoneOverride" name="timezone_override">
+                        <option value="" th:text="#{time.timezone.override.none}">Use browser timezone</option>
+                        <option th:each="timezone : ${availableTimezones}"
+                                th:value="${timezone}"
+                                th:text="${timezone}"
+                                th:selected="${timeZoneOverride != null && timeZoneOverride.toString() == timezone}"></option>
+                    </select>
+                </div>
+                <p class="form-description" th:text="#{time.timezone.override.description}">Override your timezone instead of using the browser's detected timezone. This affects how times are displayed when using Default mode.</p>
+            </div>
+
+            <div class="form-group">
+                <label for="dayStartTime" th:text="#{time.day.start.label}">Start of next day</label>
+                <div class="datetime-picker time-only" id="dayStartTimePicker">
+                    <input type="time" id="dayStartTime" name="day_start_time" step="900" th:value="${dayStartTime}"
+                           class="time-input form-control">
+                    <div class="picker-popup placement-bottom" style="display: none; min-width: 0; width: 16rem;">
+                        <div class="picker-container">
+                            <div class="time-scroll">
+                                <div class="time-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <p class="form-description" th:text="#{time.day.start.description}">Choose the time when a new day begins for you, e.g. the hour you are usually asleep. Journeys crossing this time stay on one day in the timeline. Applies to the timeline and map data. Statistics and previously generated memories keep using midnight as the day boundary.</p>
+            </div>
+        </div>
+        <div class="separator"></div>
+        <div class="form-group">
+            <h3 th:text="#{users.color.theme.label}">Color Theme</h3>
+            <p class="form-description" th:text="#{users.color.theme.description}">Choose your preferred accent color for the interface.</p>
+            
+            <div class="color-picker-section">
+                <div class="color-options">
+                    <label class="color-option" th:each="colorOption : ${defaultColors}">
+                        <input type="radio" 
+                               name="color" 
+                               th:value="${colorOption.key}" 
+                               th:checked="${selectedColor == colorOption.key || (selectedColor == null && colorOption.key == '#f1ba63')}"
+                               style="display: none;">
+                        <div class="color-swatch" 
+                             th:style="'background-color: ' + ${colorOption.key}"
+                             th:title="${colorOption.value}"></div>
+                    </label>
+                    
+                    <!-- Custom color option -->
+                    <label class="color-option custom-color-option">
+                        <input type="radio" 
+                               name="color" 
+                               id="customColorRadio"
+                               value=""
+                               style="display: none;">
+                        <div class="color-swatch custom-color-swatch" 
+                             id="customColorSwatch"
+                             th:title="#{users.color.theme.custom}">
+                            <span class="custom-color-icon">+</span>
+                        </div>
+                    </label>
+                </div>
+                
+                <!-- Custom color input -->
+                <div class="custom-color-input-section" id="customColorInputSection" style="display: none;">
+                    <label for="customColorInput" th:text="#{users.color.theme.custom.input}">Custom Color:</label>
+                    <div class="custom-color-input-wrapper">
+                        <input type="color" 
+                               id="customColorInput" 
+                               th:value="${selectedColor != null && !#lists.contains(defaultColors.![key], selectedColor) ? selectedColor : '#f1ba63'}"
+                               onchange="updateCustomColor(this.value)">
+                        <input type="text" 
+                               id="customColorText" 
+                               th:value="${selectedColor != null && !#lists.contains(defaultColors.![key], selectedColor) ? selectedColor : '#f1ba63'}"
+                               placeholder="#f1ba63"
+                               pattern="^#[0-9A-Fa-f]{6}$"
+                               onchange="updateCustomColorFromText(this.value)">
+                    </div>
+                </div>
+                
+                <div class="color-actions">
+                    <button type="button" 
+                            class="btn btn-secondary"
+                            onclick="resetToDefaultColor()"
+                            th:text="#{users.color.theme.reset}">Reset to Default</button>
+                </div>
+            </div>
+        </div>
+        <div class="separator"></div>
+        <div class="form-group">
+            <h3 th:text="#{users.home.location.label}">Home Location</h3>
+            <p class="form-description" th:text="#{users.home.location.description}">Set your home location. This location will be displayed when no data is available for the selected date.</p>
+            <div class="home-location-inputs">
+                <div class="coordinate-input">
+                    <label for="homeLatitude" th:text="#{users.home.latitude.label}">Latitude</label>
+                    <input type="number" 
+                           id="homeLatitude" 
+                           name="homeLatitude" 
+                           step="any" 
+                           min="-90" 
+                           max="90"
+                           th:value="${homeLatitude}"
+                           th:placeholder="#{users.home.latitude.placeholder}"
+                           onchange="updateMapMarker()">
+                </div>
+                <div class="coordinate-input">
+                    <label for="homeLongitude" th:text="#{users.home.longitude.label}">Longitude</label>
+                    <input type="number" 
+                           id="homeLongitude" 
+                           name="homeLongitude" 
+                           step="any" 
+                           min="-180" 
+                           max="180"
+                           th:value="${homeLongitude}"
+                           th:placeholder="#{users.home.longitude.placeholder}"
+                           onchange="updateMapMarker()">
+                </div>
+                <button type="button" 
+                        class="btn"
+                        onclick="clearHomeLocation()"
+                        th:text="#{users.home.location.clear}">Clear</button>
+            </div>
+            
+            <div id="homeLocationMap" class="home-location-map"></div>
+        </div>
+        <div class="separator"></div>
+        <div style="display: flex; gap: 10px;">
+            <button type="submit" class="btn" th:text="${userId != null ? #messages.msg('form.update') : #messages.msg('form.create')}">Create User</button>
+            <button type="button" class="btn"
+                    th:hx-get="@{/settings/users-content}"
+                    hx-target="#user-management"
+                    hx-swap="innerHTML"
+                    th:text="#{form.cancel}">Cancel</button>
+        </div>
+    </form>
+    
+    <script th:inline="javascript">
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeHomeLocationMap();
+        });
+        
+        function removeCurrentCss() {
+            if (confirm(t('users.custom.css.remove.confirm'))) {
+                document.getElementById('removeCssFlag').value = 'true';
+                document.querySelector('.current-css').style.display = 'none';
+            }
+        }
+        
+        function resetToDefaultColor() {
+            const defaultColorInput = document.querySelector('input[name="color"][value="#f1ba63"]');
+            if (defaultColorInput) {
+                defaultColorInput.checked = true;
+                hideCustomColorInput();
+            }
+        }
+        
+        function updateCustomColor(color) {
+            const customColorRadio = document.getElementById('customColorRadio');
+            const customColorText = document.getElementById('customColorText');
+            const customColorSwatch = document.getElementById('customColorSwatch');
+            
+            customColorRadio.value = color;
+            customColorRadio.checked = true;
+            customColorText.value = color;
+            customColorSwatch.style.backgroundColor = color;
+            customColorSwatch.innerHTML = '';
+        }
+        
+        function updateCustomColorFromText(color) {
+            if (/^#[0-9A-Fa-f]{6}$/.test(color)) {
+                const customColorInput = document.getElementById('customColorInput');
+                customColorInput.value = color;
+                updateCustomColor(color);
+            }
+        }
+        
+        function showCustomColorInput() {
+            document.getElementById('customColorInputSection').style.display = 'block';
+        }
+        
+        function hideCustomColorInput() {
+            document.getElementById('customColorInputSection').style.display = 'none';
+            const customColorSwatch = document.getElementById('customColorSwatch');
+            customColorSwatch.style.backgroundColor = '';
+            customColorSwatch.innerHTML = '<span class="custom-color-icon">+</span>';
+        }
+        
+        // Initialize custom color functionality
+        (function() {
+                const customColorOption = document.querySelector('.custom-color-option');
+                const selectedColor = /*[[${selectedColor}]]*/ null;
+                const defaultColors = /*[[${defaultColors.![key]}]]*/ [];
+
+                // Check if current color is custom (not in default colors)
+                if (selectedColor && !defaultColors.includes(selectedColor)) {
+                    updateCustomColor(selectedColor);
+                    showCustomColorInput();
+                }
+                
+                // Add click handler for custom color option
+                customColorOption.addEventListener('click', () => {
+                    const customColorRadio = document.getElementById('customColorRadio');
+                    const customColorInput = document.getElementById('customColorInput');
+                    
+                    customColorRadio.checked = true;
+                    showCustomColorInput();
+                    
+                    if (!customColorRadio.value) {
+                        updateCustomColor(customColorInput.value);
+                    }
+                });
+                
+                // Add change handlers for other color options to hide custom input
+                document.querySelectorAll('input[name="color"]:not(#customColorRadio)').forEach(radio => {
+                    radio.addEventListener('change', () => {
+                        if (radio.checked) {
+                            hideCustomColorInput();
+                        }
+                    });
+                });
+        })();
+    </script>
+    <script>
+        (function () {
+            const container = document.getElementById('dayStartTimePicker');
+            if (!container) return;
+            const input = container.querySelector('.time-input');
+            const popup = container.querySelector('.picker-popup');
+            const timeList = container.querySelector('.time-list');
+
+            for (let hour = 0; hour < 24; hour++) {
+                for (let minute = 0; minute < 60; minute += 15) {
+                    const item = document.createElement('button');
+                    item.type = 'button';
+                    item.className = 'time-item';
+                    item.dataset.hour = hour;
+                    item.dataset.minute = minute;
+                    item.textContent = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+                    item.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        input.value = item.textContent;
+                        input.dispatchEvent(new Event('change'));
+                        highlightSelectedTime();
+                        closePopup();
+                    });
+                    timeList.appendChild(item);
+                }
+            }
+
+            function highlightSelectedTime() {
+                const [hour, minute] = input.value ? input.value.split(':').map(Number) : [null, null];
+                let selected = null;
+                timeList.querySelectorAll('.time-item').forEach(item => {
+                    const isSelected = Number(item.dataset.hour) === hour && Number(item.dataset.minute) === minute;
+                    item.classList.toggle('selected', isSelected);
+                    if (isSelected) {
+                        selected = item;
+                    }
+                });
+                if (selected) {
+                    selected.scrollIntoView({ block: 'center' });
+                }
+            }
+
+            function closePopup() {
+                popup.style.display = 'none';
+            }
+
+            input.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const wasHidden = popup.style.display === 'none';
+                popup.style.display = wasHidden ? 'block' : 'none';
+                if (wasHidden) {
+                    highlightSelectedTime();
+                }
+            });
+
+            popup.addEventListener('click', (e) => e.stopPropagation());
+            input.addEventListener('change', highlightSelectedTime);
+            document.addEventListener('click', (e) => {
+                if (!container.contains(e.target)) {
+                    closePopup();
+                }
+            });
+            highlightSelectedTime();
+        })();
+    </script>
+</div>
+
+<div th:fragment="live-data-only-confirm" style="display:none"></div>
+
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.w3.org/1999/xhtml" th:lang="${#locale.toLanguageTag()}">
+<body>
+    <div th:fragment="settings-nav(activeSection, dataManagementEnabled, isAdmin)" class="settings-nav">
+        <a th:href="@{/settings/job-status}"
+           class="settings-nav-item" 
+           th:classappend="${activeSection == 'job-status'} ? 'active' : ''"
+           th:title="#{settings.job.status.description}"
+           th:text="#{settings.job.status}">Job Status</a>
+        
+        <a th:href="@{/settings/import}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'file-upload'} ? 'active' : ''"
+           th:title="#{settings.import.data.description}"
+           th:text="#{settings.import.data}">Import Data</a>
+
+        <a th:href="@{/settings/export-data}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'export-data'} ? 'active' : ''"
+           th:title="#{export.title.description}"
+           th:text="#{export.title}">Export Data</a>
+
+        <a th:href="@{/settings/api-tokens}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'api-tokens'} ? 'active' : ''"
+           th:title="#{settings.api.tokens.description}"
+           th:text="#{settings.api.tokens}">API Tokens</a>
+
+        <a th:href="@{/settings/share-access}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'sharing'} ? 'active' : ''"
+           th:title="#{settings.share.access.description}"
+           th:text="#{settings.share.access}">Share Access</a>
+
+        <a th:href="@{/settings/user-management}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'user-management'} ? 'active' : ''"
+           th:title="#{settings.user.management.description}"
+           th:text="#{settings.user.management}">User Management</a>
+        
+        <a th:href="@{/settings/places}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'places'} ? 'active' : ''"
+           th:title="#{settings.places.description}"
+           th:text="#{settings.places}">Places</a>
+
+        <a th:href="@{/settings/visit-sensitivity}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'visit-sensitivity'} ? 'active' : ''"
+           th:title="#{visit.sensitivity.title.description}"
+           th:text="#{visit.sensitivity.title}">Visit Sensitivity</a>
+        <a th:href="@{/settings/transportation-modes}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'transportation-modes'} ? 'active' : ''"
+           th:title="#{settings.transportation-modes.description}"
+           th:text="#{settings.transportation-modes}">Transportation Modes</a>
+
+        <a th:href="@{/settings/map-styles}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'map-styles'} ? 'active' : ''"
+           th:title="#{settings.map.styles.description}"
+           th:text="#{settings.map.styles}">Map Styles</a>
+
+        <a th:href="@{/settings/geocode-services}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'geocode-services'} ? 'active' : ''"
+           th:title="#{settings.geocoding.description}"
+           th:text="#{settings.geocoding}">Geocoding</a>
+
+        <a th:href="@{/settings/manage-data}"
+           th:if="${dataManagementEnabled}"
+           th:unless="${isLiveDataOnly}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'manage-data'} ? 'active' : ''"
+           th:title="#{settings.manage.data.description}"
+           th:text="#{settings.manage.data}">Manage Data</a>
+        
+        <a th:href="@{/settings/integrations}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'integrations'} ? 'active' : ''"
+           th:title="#{settings.integrations.description}"
+           th:text="#{settings.integrations}">Integrations</a>
+        <a th:href="@{/settings/devices}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'devices'} ? 'active' : ''"
+           th:title="#{settings.devices.description}"
+           th:text="#{settings.devices}">Devices</a>
+        <a th:href="@{/settings/logging}"
+           th:if="${isAdmin}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'logging'} ? 'active' : ''"
+           th:title="#{settings.logging.description}"
+           th:text="#{settings.logging}">Logging</a>
+        <a th:href="@{/settings/about}"
+           class="settings-nav-item"
+           th:classappend="${activeSection == 'about'} ? 'active' : ''"
+           th:title="#{settings.about.description}"
+           th:text="#{settings.about}">About</a>
+        
+        <script th:inline="javascript">
+            function appendTimezoneToLinks() {
+                const timezone = getUserTimezone();
+                const links = document.querySelectorAll('.settings-nav a');
+                links.forEach(link => {
+                    if (link.href && !link.href.includes('timezone=')) {
+                        const separator = link.href.includes('?') ? '&' : '?';
+                        link.href = `${link.href}${separator}timezone=${encodeURIComponent(timezone)}`;
+                    }
+                });
+            }
+
+            window.onload = appendTimezoneToLinks;
+        </script>
+    </div>
+</body>
+</html>

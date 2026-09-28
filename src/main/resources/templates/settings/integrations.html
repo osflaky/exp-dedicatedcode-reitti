@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="#{settings.title}">Settings - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="apple-touch-icon" th:href="@{/img/logo.svg}">
+    <link rel="shortcut icon" type="image/x-icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}">
+    <script th:src="@{/js/messages.js(v=${appVersion})}"></script>
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+    <script th:src="@{/js/util.js}"></script>
+</head>
+<body class="settings-page">
+<div class="navigation-container" th:replace="~{fragments/main-navigation :: main-navigation('settings')}"></div>
+
+<div class="settings-container">
+    <div th:replace="~{fragments/settings-navigation :: settings-nav(${activeSection}, ${dataManagementEnabled}, ${isAdmin})}"></div>
+    <div class="settings-content-area">
+        <div id="integrations" class="settings-section active" th:hx-get="@{/settings/integrations/integrations-content}" hx-swap="innerHTML" hx-trigger="load"></div>
+    </div>
+</div>
+
+
+<!-- Data Quality Content Fragment -->
+<div th:if="${dataQuality}" th:fragment="data-quality-content">
+    <h2 style="color: var(--color-highlight); margin-bottom: 20px;" th:text="#{integrations.data.quality.report.title}">📊 Data Quality Report</h2>
+    <div th:if="${errorMessage}" class="alert alert-danger" style="display: block; margin-bottom: 20px;">
+        <span th:text="${errorMessage}">Error loading data quality information</span>
+    </div>
+
+    <div style="color: var(--color-text-white);">
+        <!-- Overall Status -->
+        <div style="margin-bottom: 25px; padding: 20px; background-color: rgba(255,255,255,0.1); border-radius: 8px;">
+            <h3 style="margin: 0 0 15px 0; color: var(--color-accent);" th:text="#{integrations.data.quality.overall.title}">📈 Overall Data Quality</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.total.points}">Total Location Points</div>
+                    <div style="font-size: 1.5em; font-weight: bold;" th:text="${dataQuality.totalPoints}">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.last.24h}">Last 24 Hours</div>
+                    <div style="font-size: 1.5em; font-weight: bold;" th:text="${dataQuality.pointsLast24h}">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.last.7d}">Last 7 Days</div>
+                    <div style="font-size: 1.5em; font-weight: bold;" th:text="${dataQuality.pointsLast7d}">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.avg.per.day}">Average per Day</div>
+                    <div style="font-size: 1.5em; font-weight: bold;" th:text="${dataQuality.avgPointsPerDay}">0</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Freshness -->
+        <div style="margin-bottom: 25px; padding: 20px; background-color: rgba(255,255,255,0.1); border-radius: 8px;">
+            <h3 th:text="#{integrations.data.quality.freshness.title}">🕒 Data Freshness</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                <div>
+                    <div th:text="#{integrations.data.quality.latest.point}">Latest Point Received</div>
+                    <div th:text="${dataQuality.latestPointTime ?: #messages.msg('integrations.data.quality.no.data')}">Never</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.time.since}">Time Since Last Point</div>
+                    <div style="font-size: 1.2em;" th:text="${dataQuality.timeSinceLastPoint ?: 'N/A'}">N/A</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tracking Quality -->
+        <div style="margin-bottom: 25px; padding: 20px; background-color: rgba(255,255,255,0.1); border-radius: 8px;">
+            <h3 style="margin: 0 0 15px 0; color: var(--color-accent);" th:text="#{integrations.data.quality.tracking.title}">📍 Tracking Quality</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.avg.accuracy}">Average Accuracy</div>
+                    <div style="font-size: 1.2em;" th:text="${dataQuality.avgAccuracy != null ? dataQuality.avgAccuracy + 'm' : 'N/A'}">N/A</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.good.accuracy}">Points with Good Accuracy (&lt;50m)</div>
+                    <div style="font-size: 1.2em;" th:text="${dataQuality.goodAccuracyPercentage != null ? dataQuality.goodAccuracyPercentage + '%' : 'N/A'}">N/A</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.9em; color: #ccc;" th:text="#{integrations.data.quality.avg.interval}">Average Interval</div>
+                    <div style="font-size: 1.2em;" th:text="${dataQuality.avgInterval ?: 'N/A'}">N/A</div>
+                </div>
+            </div>
+        </div>
+        <!-- Status Indicators -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+            <div th:if="${dataQuality.isActivelyTracking}" class="alert alert-info">
+                <div th:text="#{integrations.data.quality.status.actively.tracking}">✅ Actively Tracking</div>
+                <div th:text="#{integrations.data.quality.status.actively.tracking.desc}">Location data is being received regularly</div>
+            </div>
+            <div th:unless="${dataQuality.isActivelyTracking}" class="alert alert-danger">
+                <div th:text="#{integrations.data.quality.status.not.tracking}">❌ Not Actively Tracking</div>
+                <div th:text="#{integrations.data.quality.status.not.tracking.desc}">No recent location data received</div>
+            </div>
+
+            <div th:if="${dataQuality.hasGoodFrequency}" class="alert alert-info">
+                <div th:text="#{integrations.data.quality.status.good.frequency}">✅ Good Frequency</div>
+                <div th:text="#{integrations.data.quality.status.good.frequency.desc}">Location points are frequent enough for accurate tracking</div>
+            </div>
+            <div th:unless="${dataQuality.hasGoodFrequency}" class="alert alert-warning">
+                <div th:text="#{integrations.data.quality.status.low.frequency}">⚠️ Low Frequency</div>
+                <div th:text="#{integrations.data.quality.status.low.frequency.desc}">Consider increasing tracking frequency for better accuracy</div>
+            </div>
+
+            <div th:if="${dataQuality.hasFluctuatingFrequency}" class="alert alert-warning">
+                <div th:text="#{integrations.data.quality.status.fluctuating.frequency}">⚠️ Fluctuating Frequency</div>
+                <div th:text="#{integrations.data.quality.status.fluctuating.frequency.desc}">Tracking intervals vary significantly, which may affect accuracy</div>
+            </div>
+
+            <div th:unless="${dataQuality.hasFluctuatingFrequency}" class="alert alert-info">
+                <div th:text="#{integrations.data.quality.status.good.consistency}">✅ Good Consistency</div>
+                <div th:text="#{integrations.data.quality.status.good.consistency.desc}">Tracking intervals are consistent and stable</div>
+            </div>
+        </div>
+
+        <!-- Recommendations -->
+        <div th:if="${dataQuality.recommendations != null && !dataQuality.recommendations.isEmpty()}" class="alert alert-warning">
+            <p th:text="#{integrations.data.quality.recommendations.title}">💡 Recommendations</p>
+            <ul>
+                <li th:each="recommendation : ${dataQuality.recommendations}"
+                    th:text="${recommendation}">
+                    Recommendation
+                </li>
+            </ul>
+        </div>
+
+        <!-- Action Buttons -->
+        <div style="margin-top: 25px; text-align: center; display: flex; gap: 15px; justify-content: center;">
+            <button class="btn"
+                    th:hx-get="@{/settings/integrations/data-quality-content}"
+                    hx-target="#integrations"
+                    hx-swap="innerHTML"
+                    hx-indicator="#refresh-data-spinner">
+                <span class="button-text" th:text="#{integrations.data.quality.refresh}">Refresh Data</span>
+                <span id="refresh-data-spinner" class="htmx-indicator">
+                    <i class="lni lni-is-spinning lni-spinner-2-sacle"></i>
+                </span>
+            </button>
+            <button class="btn btn-secondary"
+                    th:hx-get="@{/settings/integrations/integrations-content}"
+                    hx-target="#integrations"
+                    hx-swap="innerHTML"
+                    th:text="#{form.close}">
+                Close
+            </button>
+        </div>
+    </div>
+</div>
+
+<span th:text="${firstToken}" id="current-token" style="display:none;"></span>
+<script th:inline="javascript">
+    window.contextPath = /*[[@{/}]]*/ "/";
+    window.contextPath = window.contextPath.replace(/\/$/, '');
+    window.userSettings = /*[[${userSettings}]]*/ {};
+
+    function getCurrentOpenSection() {
+        const detailsElements = document.querySelectorAll('details');
+        for (const details of detailsElements) {
+            if (details.open) {
+                // Return the section identifier (e.g., 'gps-logger', 'owntracks-app', etc.)
+                return details.getAttribute('data-section');
+            }
+        }
+        return null; // No section is open
+    }
+</script>
+
+</body>
+</html>

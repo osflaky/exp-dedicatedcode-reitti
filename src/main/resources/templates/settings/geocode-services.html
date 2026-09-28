@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:lang="${#locale.toLanguageTag()}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="#{settings.title}">Settings - Reitti</title>
+    <link rel="icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="apple-touch-icon" th:href="@{/img/logo.svg}">
+    <link rel="shortcut icon" type="image/x-icon" th:href="@{/img/logo-64x64.png}">
+    <link rel="stylesheet" th:href="@{/css/main.css}">
+    <link rel="stylesheet" th:href="@{/css/lineicons.css}">
+    <script th:src="@{/js/messages.js(v=${appVersion})}"></script>
+    <script th:src="@{/js/vendor/htmx.min.js}"></script>
+    <script th:src="@{/js/util.js}"></script>
+</head>
+<body class="settings-page">
+<div class="navigation-container" th:replace="~{fragments/main-navigation :: main-navigation('settings')}"></div>
+
+<div class="settings-container">
+    <div th:replace="~{fragments/settings-navigation :: settings-nav(${activeSection}, ${dataManagementEnabled}, ${isAdmin})}"></div>
+    <div class="settings-content-area">
+        <!-- Geocoding Services Section -->
+        <div id="geocode-services" class="settings-section active">
+            <div th:fragment="geocode-services-content">
+                <h2 th:text="#{geocoding.title}">Geocoding Services</h2>
+
+                <div th:if="${successMessage}" class="alert alert-success" style="display: block;">
+                    <span th:text="${successMessage}">Service created successfully</span>
+                </div>
+                <div th:if="${errorMessage}" class="alert alert-danger" style="display: block;">
+                    <span th:text="${errorMessage}">Error message</span>
+                </div>
+                <div class="settings-card">
+                    <h4 th:text="#{geocoding.about.title}">About Geocoding Services</h4>
+                    <p th:text="#{geocoding.about.description}">Geocoding services convert coordinates to addresses for
+                        your significant places. You can add multiple services and the system will use them randomly to
+                        distribute the load.</p>
+                    <p th:text="#{geocoding.about.format}">Make sure that the geocoding service answers with GeoJson.
+                        This is the only supported response.</p>
+                    <p><strong th:text="#{geocoding.url.placeholders}">URL Template placeholders:</strong></p>
+                    <ul>
+                        <li><code>{lat}</code> - <span th:text="#{geocoding.placeholder.lat}">Will be replaced with latitude</span>
+                        </li>
+                        <li><code>{lng}</code> - <span th:text="#{geocoding.placeholder.lng}">Will be replaced with longitude</span>
+                        </li>
+                    </ul>
+                    <p><strong th:text="#{geocoding.example}">Example:</strong> <code>https://nominatim.openstreetmap.org/reverse?format=geocodejson&lat={lat}&lon={lng}&zoom=18&addressdetails=1</code></p>
+                </div>
+                <div class="settings-card">
+                    <h3 th:text="#{geocoding.available.services}">Available Services</h3>
+                    <div th:if="${geocodeServices.isEmpty()}">
+                        <p th:text="#{geocoding.no.services}">No geocoding services configured.</p>
+                    </div>
+                    <table th:if="${!geocodeServices.isEmpty()}">
+                        <thead>
+                        <tr>
+                            <th th:text="#{geocoding.table.name}">Name</th>
+                            <th th:text="#{geocoding.table.type}">Type</th>
+                            <th th:text="#{geocoding.table.priority}">Priority</th>
+                            <th th:text="#{geocoding.table.url}">URL Template</th>
+                            <th th:text="#{geocoding.table.status}">Status</th>
+                            <th th:text="#{geocoding.table.errors}">Errors</th>
+                            <th th:text="#{geocoding.table.last.used}">Last Used</th>
+                            <th th:text="#{geocoding.table.actions}">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr th:each="service : ${geocodeServices}">
+                            <td th:text="${service.name}"></td>
+                            <td th:text="#{'geocoding.service.type.' + ${service.type} + '.name'}"></td>
+                            <td th:text="#{'priority.' + ${service.priority} + '.label'}"></td>
+                            <td style="max-width: 300px; word-break: break-all; font-family: monospace;"
+                                th:text="${service.urlTemplate}"></td>
+                            <td>
+                                <span th:if="${service.enabled}">
+                                    <i class="lni lni-check"></i>
+                                    <span th:text="#{geocoding.status.enabled}">Enabled</span>
+                                </span>
+                                <span th:if="${!service.enabled}" style="color: red;">
+                                    <i class="lni lni-xmark"></i>
+                                    <span th:text="#{geocoding.status.disabled}">Disabled</span>
+                                </span>
+                            </td>
+                            <td>
+                                <span th:text="${service.errorCount + '/' + maxErrors}"></span>
+                                <span th:if="${service.errorCount >= maxErrors}" th:text="#{geocoding.auto.disabled}"> (Auto-disabled)</span>
+                            </td>
+                            <td th:text="${service.lastUsed != null ? #temporals.format(service.lastUsed, 'yyyy-MM-dd HH:mm') : #messages.msg('geocoding.never.used')}"></td>
+                            <td>
+                                <button class="btn"
+                                        th:attr="hx-get=@{/settings/geocode-services/edit/{id}(id=${service.id})}"
+                                        hx-target="#geocoding-form-container"
+                                        hx-swap="innerHTML"
+                                        th:text="#{form.edit}">
+                                    Edit
+                                </button>
+
+                                <button class="btn"
+                                        th:attr="hx-post=@{/settings/geocode-services/{id}/toggle(id=${service.id})}"
+                                        hx-target="#geocode-services"
+                                        hx-swap="innerHTML"
+                                        th:text="${service.enabled ? #messages.msg('geocoding.disable') : #messages.msg('geocoding.enable')}">
+                                    Toggle
+                                </button>
+
+                                <button th:if="${service.errorCount > 0}"
+                                        class="btn"
+                                        th:attr="hx-post=@{/settings/geocode-services/{id}/reset-errors(id=${service.id})}"
+                                        hx-target="#geocode-services"
+                                        hx-swap="innerHTML"
+                                        th:text="#{geocoding.reset.errors}">Reset Errors
+                                </button>
+
+                                <button class="btn btn-danger"
+                                        th:attr="hx-post=@{/settings/geocode-services/{id}/delete(id=${service.id})}, hx-confirm=#{geocoding.delete.confirm}"
+                                        hx-target="#geocode-services"
+                                        hx-swap="innerHTML"
+                                        th:text="#{form.delete}">Delete
+                                </button>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="settings-card" id="geocoding-form-container">
+                    <form th:hx-post="@{/settings/geocode-services}" hx-target="#geocode-services" hx-swap="innerHTML"
+                          class="geocode-service-form" style="margin-bottom: 20px;">
+                        <h3 th:text="#{geocoding.add.title}">Add New Geocoding Service</h3>
+                        <div class="form-group">
+                            <label for="type" th:text="#{geocoding.service.type}">Type</label>
+                            <select id="type" name="type" required
+                                    th:hx-get="@{/settings/geocode-services/type-fields}"
+                                    hx-trigger="change, load"
+                                    hx-target="#geocoding-type-specific-fields">
+                                <option th:each="type : ${geocodeServiceTypes}"
+                                        th:value="${type}"
+                                        th:text="#{'geocoding.service.type.' + ${type} + '.name'}">
+                                </option>
+                            </select>
+                        </div>
+                        <div id="geocoding-type-specific-fields"></div>
+
+                        <div id="test-result">
+                            <!-- Test results will be rendered here -->
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn" th:text="#{form.create}">Add Service</button>
+                            <button type="button" class="btn btn-secondary"
+                                    th:hx-post="@{/settings/geocode-services/test-config}"
+                                    hx-include=".geocode-service-form"
+                                    hx-target="#test-result"
+                                    hx-indicator="#test-spinner">
+                                <span th:text="#{geocoding.test.button}">Test Connection</span>
+                                <span id="test-spinner" class="htmx-indicator"><i class="lni lni-is-spinning lni-spinner-2-sacle"></i></span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="settings-card">
+                    <h3 th:text="#{geocoding.execution.title}">Geocoding Execution</h3>
+                    <p th:text="#{geocoding.execution.description}">Manually trigger geocoding operations for your
+                        significant places</p>
+
+                    <div class="action-card">
+                        <h4 th:text="#{geocoding.run.title}">Run Geocoding</h4>
+                        <p th:text="#{geocoding.run.description}">Process all significant places that haven't been
+                            geocoded yet</p>
+                        <button class="btn"
+                                th:hx-post="@{/settings/geocode-services/run-geocoding}"
+                                hx-target="#geocode-services"
+                                hx-swap="innerHTML"
+                                th:attr="hx-confirm=#{geocoding.run.confirm}"
+                                hx-indicator="#run-geocode-spinner">
+                            <span class="button-text" th:text="#{geocoding.run.button}">Start Geocoding</span>
+                            <span id="run-geocode-spinner" class="htmx-indicator"><i class="lni lni-is-spinning lni-spinner-2-sacle"></i></span>
+
+                        </button>
+                    </div>
+                    <div class="action-card">
+                        <h4 th:text="#{geocoding.clear.title}">Clear and Re-geocode All</h4>
+                        <p th:text="#{geocoding.clear.description}">Clear all existing geocoding data and re-process all
+                            significant places</p>
+                        <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; padding: 10px; margin: 10px 0; color: #856404;">
+                            <strong>⚠️ <span th:text="#{label.warning}">Warning:</span></strong> <span th:text="#{geocoding.clear.warning}">This will clear all existing address information and re-geocode all places</span>
+                        </div>
+                        <button class="btn btn-danger"
+                                th:hx-post="@{/settings/geocode-services/clear-and-rerun}"
+                                hx-target="#geocode-services"
+                                hx-swap="innerHTML"
+                                th:attr="hx-confirm=#{geocoding.clear.confirm}"
+                                hx-indicator="#clear-re-geocode-spinner">
+                            <span class="button-text" th:text="#{geocoding.clear.button}">Clear and Re-geocode</span>
+                            <span id="clear-re-geocode-spinner" class="htmx-indicator"><i class="lni lni-is-spinning lni-spinner-2-sacle"></i></span>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</div>
+<script th:inline="javascript">
+    window.userSettings = /*[[${userSettings}]]*/ {}
+</script>
+</body>
